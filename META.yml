@@ -4,6 +4,7 @@ author:
   - 'Douglas Christopher Wilson <doug@somethingdoug.com>'
 build_requires:
   ExtUtils::MakeMaker: 6.42
+  HTTP::Response: 0
   Test::MockObject: 0
   Test::More: 0
 configure_requires:
@@ -37,4 +38,4 @@ resources:
   homepage: http://github.com/dougwilson/perl5-nagios-plugin-overhttp/tree/master
   license: http://dev.perl.org/licenses/
   repository: git://github.com/dougwilson/perl5-nagios-plugin-overhttp.git
-version: 0.05
+version: 0.06

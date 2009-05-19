@@ -8,11 +8,12 @@ use warnings 'all';
 
 # Module metadata
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 use MooseX::Types 0.08 -declare => [qw(
 	Hostname
 	Path
+	Timeout
 	URL
 )];
 
@@ -20,7 +21,7 @@ use Data::Validate::Domain 0.02;
 use Data::Validate::URI 0.05;
 
 # Import built-in types
-use MooseX::Types::Moose qw(Str);
+use MooseX::Types::Moose qw(Int Str);
 
 # Type definitions
 subtype Hostname,
@@ -32,6 +33,11 @@ subtype Path,
 	as Str,
 	where { m{\A /}msx; },
 	message { 'Must be a valid URL path' };
+
+subtype Timeout,
+	as Int,
+	where { $_ > 0 && int($_) == $_ },
+	message { 'Timeout must be a positive integer' };
 
 subtype URL,
 	as Str,
@@ -55,7 +61,7 @@ Nagios::Plugin::OverHTTP::Library - Types library
 
 =head1 VERSION
 
-This documentation refers to <Nagios::Plugin::OverHTTP::Library> version 0.05
+This documentation refers to <Nagios::Plugin::OverHTTP::Library> version 0.06
 
 =head1 SYNOPSIS
 
@@ -78,6 +84,8 @@ No methods.
 =item * Hostname
 
 =item * Path
+
+=item * Timeout
 
 =item * URL
 
