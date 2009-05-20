@@ -8,7 +8,7 @@ use warnings 'all';
 
 # Module metadata
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use Carp ();
 use LWP::UserAgent ();
@@ -39,7 +39,9 @@ has 'hostname' => (
 	documentation => q{The hostname on which the URL is located},
 
 	builder       => '_build_hostname',
+	clearer       => '_clear_hostname',
 	lazy          => 1,
+	predicate     => '_has_hostname',
 	trigger       => sub {
 		my ($self) = @_;
 
@@ -67,9 +69,11 @@ has 'path' => (
 	isa           => Path,
 	documentation => q{The path of the plugin on the host},
 
+	builder       => '_build_path',
+	clearer       => '_clear_path',
 	coerce        => 1,
 	lazy          => 1,
-	builder       => '_build_path',
+	predicate     => '_has_path',
 	trigger       => sub {
 		my ($self) = @_;
 
@@ -168,7 +172,14 @@ sub check {
 	# Restore the previous timeout value to the useragent
 	$self->useragent->timeout($old_timeout);
 
-	if ($response->code =~ m{\A5}msx) {
+	if ($response->code == 500 && $response->message eq 'read timeout') {
+		# Failure due to timeout
+		my $timeout = $self->has_timeout ? $self->timeout : $self->useragent->timeout;
+
+		$self->_set_state($STATUS_CRITICAL, sprintf 'Socket timeout after %d seconds', $timeout);
+		return;
+	}
+	elsif ($response->code =~ m{\A5}msx) {
 		# There was some type of internal error
 		$self->_set_state($STATUS_CRITICAL, sprintf '%d %s', $response->code, $response->message);
 		return;
@@ -187,17 +198,29 @@ sub check {
 	);
 
 	# By default we do not know the status
-	my $status = $STATUS_UNKNOWN;
+	my $status;
 	my $status_header = $response->header('X-Nagios-Status');
 
-	if (defined $status_header && exists $status_prefix_map{$status_header}) {
+	if (defined $status_header) {
 		# Get the status from the header if present
-		$status = $status_prefix_map{$status_header};
+		if ($status_header =~ m{\A [0123] \z}msx) {
+			# The status header is the decimal status
+			$status = $status_header;
+		}
+		elsif (exists $status_prefix_map{$status_header}) {
+			# The status header is the word of the status
+			$status = $status_prefix_map{$status_header};
+		}
 	}
 	elsif (my ($inc_status) = $response->decoded_content =~ m{\A([A-Z]+)}msx) {
 		if (exists $status_prefix_map{$inc_status}) {
 			$status = $status_prefix_map{$inc_status};
 		}
+	}
+
+	if (!defined $status) {
+		# The status was not found in the response
+		$status = $STATUS_UNKNOWN;
 	}
 
 	$self->_set_state($status, $response->decoded_content);
@@ -261,6 +284,13 @@ sub _build_status {
 
 sub _build_url {
 	my ($self) = @_;
+
+	if (!$self->_has_hostname) {
+		Carp::croak 'Unable to build the URL due to no hostname being provided';
+	}
+	elsif (!$self->_has_path) {
+		Carp::croak 'Unable to build the URL due to no path being provided.';
+	}
 
 	# Form the URI object
 	my $url = URI->new(sprintf 'http://%s%s', $self->{hostname}, $self->{path});
@@ -344,7 +374,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.06
+Version 0.07
 
 =head1 SYNOPSIS
 
@@ -442,6 +472,81 @@ following:
   my $plugin = Plugin::Nagios::OverHTTP->new_with_options;
 
   exit $plugin->run;
+
+=head1 PROTOCOL
+
+=head2 HTTP STATUS
+
+The protocol that this plugin uses to comunicate with the Nagios plugins is
+unique to my knowledge. If anyone knows another way that plugins are
+communicating over HTTP then let me know.
+
+A request that returns a 5xx status will automatically return as CRITICAL and
+the plugin will display the error code and the status message (this will
+typically result in 500 Internal Server Error).
+
+A request that returns a 2xx status will be parsed using the methods listed in
+L</HTTP BODY>.
+
+Any other status code will cause the plugin to return as UNKNOWN and the plugin
+will display the error code and the status message.
+
+=head2 HTTP BODY
+
+The body of the HTTP response will be the output of the plugin. To determine
+what the status code will be, the following methods are used:
+
+=over 4
+
+=item 1.
+
+If a the header C<X-Nagios-Status> is present, the value from that is used as
+the output. The content of this header MUST be either the decimal return value
+of the plugin or an all capital letters. The different possibilities for this
+is listed in L</NAGIOS STATUSES>.
+
+=item 2.
+
+If the header did not conform to proper specifications or was not present, then
+the status will be extracted from the body of the response. The very first set
+of all capital letters is taken from the body and used to determine the result.
+The different possibilities for this is listed in L</NAGIOS STATUSES>
+
+=back
+
+=head2 NAGIOS STATUSES
+
+=over 4
+
+=item 0 OK
+
+=item 1 WARNING
+
+=item 2 CRITICAL
+
+=item 3 UNKNOWN
+
+=back
+
+=head2 EXAMPLE
+
+The following is an example of a simple bootstrapping of a plugin on a remote
+server.
+
+  #!/usr/bin/env perl
+  
+  use strict;
+  use warnings;
+  
+  my $output = qx{/usr/local/libexec/nagios/check_users2 -w 100 -c 500};
+  
+  my $status = $? > 0 ? $? >> 8 : 3;
+  
+  printf "X-Nagios-Header: %d\n", $status;
+  print  "Content-Type: text/plain\n\n";
+  print  $output if $output;
+  
+  exit 0;
 
 =head1 DEPENDENCIES
 
