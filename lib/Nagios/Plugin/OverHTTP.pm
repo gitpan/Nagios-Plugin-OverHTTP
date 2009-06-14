@@ -8,9 +8,10 @@ use warnings 'all';
 
 # Module metadata
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 use Carp ();
+use HTTP::Status qw(:constants);
 use LWP::UserAgent ();
 use Moose 0.74;
 use MooseX::StrictConstructor 0.08;
@@ -88,7 +89,7 @@ has 'path' => (
 has 'ssl' => (
 	is            => 'rw',
 	isa           => 'Bool',
-	documentation => q{Whether to use SSL},
+	documentation => q{Whether to use SSL (defaults to no)},
 
 	builder       => '_build_ssl',
 	clearer       => '_clear_ssl',
@@ -108,7 +109,7 @@ has 'ssl' => (
 has 'timeout' => (
 	is            => 'rw',
 	isa           => Timeout,
-	documentation => q{The HTTP request timeout in seconds},
+	documentation => q{The HTTP request timeout in seconds (defaults to nothing)},
 
 	clearer       => 'clear_timeout',
 	predicate     => 'has_timeout',
@@ -172,21 +173,26 @@ sub check {
 	# Restore the previous timeout value to the useragent
 	$self->useragent->timeout($old_timeout);
 
-	if ($response->code == 500 && $response->message eq 'read timeout') {
+	if ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message eq 'read timeout') {
 		# Failure due to timeout
 		my $timeout = $self->has_timeout ? $self->timeout : $self->useragent->timeout;
 
 		$self->_set_state($STATUS_CRITICAL, sprintf 'Socket timeout after %d seconds', $timeout);
 		return;
 	}
-	elsif ($response->code =~ m{\A5}msx) {
+	elsif ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message =~ m{\(connect: \s timeout\)}msx) {
+		# Failure to connect to the host server
+		$self->_set_state($STATUS_CRITICAL, 'Connection refused ');
+		return;
+	}
+	elsif (HTTP::Status::is_server_error($response->code)) {
 		# There was some type of internal error
-		$self->_set_state($STATUS_CRITICAL, sprintf '%d %s', $response->code, $response->message);
+		$self->_set_state($STATUS_CRITICAL, $response->status_line);
 		return;
 	}
 	elsif (!$response->is_success) {
 		# The response was not a success
-		$self->_set_state($STATUS_UNKNOWN, sprintf '%d %s', $response->code, $response->message);
+		$self->_set_state($STATUS_UNKNOWN, $response->status_line);
 		return;
 	}
 
@@ -374,7 +380,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.07
+Version 0.08
 
 =head1 SYNOPSIS
 
@@ -417,7 +423,7 @@ automatically be populated if L</url> is set.
 
 =head3 ssl
 
-This is a boolean of weither or not to use SSL over HTTP (HTTPS). This defaults
+This is a Boolean of whether or not to use SSL over HTTP (HTTPS). This defaults
 to false and will automatically be updated to true if a HTTPS URL is set to
 L</url>.
 
@@ -477,7 +483,7 @@ following:
 
 =head2 HTTP STATUS
 
-The protocol that this plugin uses to comunicate with the Nagios plugins is
+The protocol that this plugin uses to communicate with the Nagios plugins is
 unique to my knowledge. If anyone knows another way that plugins are
 communicating over HTTP then let me know.
 
@@ -553,6 +559,10 @@ server.
 =over 4
 
 =item * L<Carp>
+
+=item * L<HTTP::Status>
+
+=item * L<LWP::UserAgent>
 
 =item * L<Moose> 0.74
 

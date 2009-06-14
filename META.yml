@@ -6,11 +6,11 @@ build_requires:
   ExtUtils::MakeMaker: 6.42
   HTTP::Response: 0
   Test::MockObject: 0
-  Test::More: 0
+  Test::More: 0.82
 configure_requires:
   ExtUtils::MakeMaker: 6.42
 distribution_type: module
-generated_by: 'Module::Install version 0.87'
+generated_by: 'Module::Install version 0.91'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -24,6 +24,7 @@ requires:
   Data::Validate::Domain: 0.02
   Data::Validate::URI: 0.05
   Getopt::Long::Descriptive: 0
+  HTTP::Status: 5.817
   LWP::UserAgent: 0
   Moose: 0.74
   MooseX::Getopt: 0.18
@@ -38,4 +39,4 @@ resources:
   homepage: http://github.com/dougwilson/perl5-nagios-plugin-overhttp/tree/master
   license: http://dev.perl.org/licenses/
   repository: git://github.com/dougwilson/perl5-nagios-plugin-overhttp.git
-version: 0.07
+version: 0.08

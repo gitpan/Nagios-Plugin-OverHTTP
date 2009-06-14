@@ -10,6 +10,7 @@ resources repository => 'git://github.com/dougwilson/perl5-nagios-plugin-overhtt
 requires 'Data::Validate::Domain'    => '0.02';
 requires 'Data::Validate::URI'       => '0.05';
 requires 'Getopt::Long::Descriptive' => 0;
+requires 'HTTP::Status'              => '5.817';
 requires 'LWP::UserAgent'            => 0;
 requires 'Moose'                     => '0.74';
 requires 'MooseX::Getopt'            => '0.18';
@@ -20,9 +21,9 @@ requires 'Scalar::Util'              => '1.19';
 requires 'URI'                       => 0;
 requires 'version'                   => '0.74';
 
-build_requires 'HTTP::Response';
-build_requires 'Test::MockObject';
-build_requires 'Test::More';
+build_requires 'HTTP::Response'   => 0;
+build_requires 'Test::MockObject' => 0;
+build_requires 'Test::More'       => '0.82';
 
 install_script 'bin/check_over_http';
 
