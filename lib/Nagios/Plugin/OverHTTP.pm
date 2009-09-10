@@ -2,27 +2,29 @@ package Nagios::Plugin::OverHTTP;
 
 use 5.008001;
 use strict;
-use utf8;
-use version 0.74;
 use warnings 'all';
 
 # Module metadata
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
-use Carp ();
+use Carp qw(croak);
 use HTTP::Status qw(:constants);
-use LWP::UserAgent ();
+use LWP::UserAgent;
 use Moose 0.74;
 use MooseX::StrictConstructor 0.08;
 use Nagios::Plugin::OverHTTP::Library qw(
 	Hostname
 	Path
+	Status
 	Timeout
 	URL
 );
 use Readonly;
 use URI;
+
+# Clean the imports are the end of scope
+use namespace::clean 0.04 -except => [qw(meta)];
 
 with 'MooseX::Getopt';
 
@@ -33,6 +35,15 @@ Readonly our $STATUS_CRITICAL => 2;
 Readonly our $STATUS_UNKNOWN  => 3;
 
 # Attributes
+
+has 'default_status' => (
+	is            => 'rw',
+	isa           => Status,
+	documentation => q{The default status if none specified in the response},
+
+	coerce        => 1,
+	default       => $STATUS_UNKNOWN,
+);
 
 has 'hostname' => (
 	is            => 'rw',
@@ -117,7 +128,7 @@ has 'timeout' => (
 
 has 'status' => (
 	is            => 'ro',
-	isa           => 'Int',
+	isa           => Status,
 
 	builder       => '_build_status',
 	clearer       => '_clear_status',
@@ -173,6 +184,7 @@ sub check {
 	# Restore the previous timeout value to the useragent
 	$self->useragent->timeout($old_timeout);
 
+	## no critic (ControlStructures::ProhibitCascadingIfElse)
 	if ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message eq 'read timeout') {
 		# Failure due to timeout
 		my $timeout = $self->has_timeout ? $self->timeout : $self->useragent->timeout;
@@ -209,24 +221,15 @@ sub check {
 
 	if (defined $status_header) {
 		# Get the status from the header if present
-		if ($status_header =~ m{\A [0123] \z}msx) {
-			# The status header is the decimal status
-			$status = $status_header;
-		}
-		elsif (exists $status_prefix_map{$status_header}) {
-			# The status header is the word of the status
-			$status = $status_prefix_map{$status_header};
-		}
+		$status = to_Status($status_header);
 	}
 	elsif (my ($inc_status) = $response->decoded_content =~ m{\A([A-Z]+)}msx) {
-		if (exists $status_prefix_map{$inc_status}) {
-			$status = $status_prefix_map{$inc_status};
-		}
+		$status = to_Status($inc_status);
 	}
 
 	if (!defined $status) {
 		# The status was not found in the response
-		$status = $STATUS_UNKNOWN;
+		$status = $self->default_status;
 	}
 
 	$self->_set_state($status, $response->decoded_content);
@@ -292,10 +295,10 @@ sub _build_url {
 	my ($self) = @_;
 
 	if (!$self->_has_hostname) {
-		Carp::croak 'Unable to build the URL due to no hostname being provided';
+		croak 'Unable to build the URL due to no hostname being provided';
 	}
 	elsif (!$self->_has_path) {
-		Carp::croak 'Unable to build the URL due to no path being provided.';
+		croak 'Unable to build the URL due to no path being provided.';
 	}
 
 	# Form the URI object
@@ -324,7 +327,7 @@ sub _populate_from_url {
 	my ($self) = @_;
 
 	if (!$self->_has_url) {
-		Carp::croak 'Unable to build requested attributes, as no URL as been defined';
+		croak 'Unable to build requested attributes, as no URL as been defined';
 	}
 
 	# Create a URI object from the url
@@ -367,9 +370,6 @@ sub _set_state {
 # Make immutable
 __PACKAGE__->meta->make_immutable;
 
-# Clean out Moose keywords
-no Moose;
-
 1;
 
 __END__
@@ -380,7 +380,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.08
+Version 0.09
 
 =head1 SYNOPSIS
 
@@ -411,48 +411,26 @@ constructor needs to be called to create an object to work with.
 
 This will construct a new plugin object.
 
-=head3 hostname
+=over
 
-This is the hostname of the remote server. This will automatically be populated
-if L</url> is set.
+=item B<< new(%attributes) >>
 
-=head3 path
+C<< %attributes >> is a HASH where the keys are attributes (specified in the
+L</ATTRIBUTES> section).
 
-This is the path to the remove Nagios plugin on the remote server. This will
-automatically be populated if L</url> is set.
+=item B<< new($attributes) >>
 
-=head3 ssl
+C<< $attributes >> is a HASHREF where the keys are attributes (specified in the
+L</ATTRIBUTES> section).
 
-This is a Boolean of whether or not to use SSL over HTTP (HTTPS). This defaults
-to false and will automatically be updated to true if a HTTPS URL is set to
-L</url>.
-
-=head3 timeout
-
-This is a positive integer for the timeout of the HTTP request. If set, this
-will override any timeout defined in the useragent for the duration of the
-request. The plugin will not permanently alter the timeout in the useragent.
-This defaults to not being set, and so the useragent's timeout is used.
-
-=head3 url
-
-This is the URL of the remote Nagios plugin to check. If not supplied, this will
-be constructed automatically from the L</hostname> and L</path> attributes.
-
-=head3 useragent
-
-This is the useragent to use when making requests. This defaults to
-L<LWP::Useragent> with no options. Currently this must be an L<LWP::Useragent>
-object.
+=back
 
 =head2 new_with_options
 
 This is identical to L</new>, except with the additional feature of reading the
-C<@ARGV> in the invoked scope (NOTE: a HASHREF cannot be provided as the
-constructing argument due to a bug in L<MooseX::Getopt>). C<@ARGV> will be
-parsed for command-line arguments. The command-line can contain any variable
-that L</new> can take. Arguments should be in the following format on the
-command line:
+C<@ARGV> in the invoked scope. C<@ARGV> will be parsed for command-line
+arguments. The command-line can contain any variable that L</new> can take.
+Arguments should be in the following format on the command line:
 
   --url=http://example.net/check_something
   --url http://example.net/check_something
@@ -461,6 +439,58 @@ command line:
   # For bools, like SSL, you would use:
   --ssl    # Enable SSL
   --no-ssl # Disable SSL
+
+=head1 ATTRIBUTES
+
+  # Set an attribute
+  $object->attribute_name($new_value);
+
+  # Get an attribute
+  my $value = $object->attribute_name;
+
+=head2 default_status
+
+B<Added in version 0.09>; be sure to require this version for this feature.
+
+This is the default status that will be used if the remote plugin does not
+return a status. The default is "UNKNOWN." The status may be the status number,
+or a string with the name of the status, like:
+
+  $plugin->default_status('CRITICAL');
+
+=head2 hostname
+
+This is the hostname of the remote server. This will automatically be populated
+if L</url> is set.
+
+=head2 path
+
+This is the path to the remove Nagios plugin on the remote server. This will
+automatically be populated if L</url> is set.
+
+=head2 ssl
+
+This is a Boolean of whether or not to use SSL over HTTP (HTTPS). This defaults
+to false and will automatically be updated to true if a HTTPS URL is set to
+L</url>.
+
+=head2 timeout
+
+This is a positive integer for the timeout of the HTTP request. If set, this
+will override any timeout defined in the useragent for the duration of the
+request. The plugin will not permanently alter the timeout in the useragent.
+This defaults to not being set, and so the useragent's timeout is used.
+
+=head2 url
+
+This is the URL of the remote Nagios plugin to check. If not supplied, this will
+be constructed automatically from the L</hostname> and L</path> attributes.
+
+=head2 useragent
+
+This is the useragent to use when making requests. This defaults to
+L<LWP::Useragent> with no options. Currently this must be an L<LWP::Useragent>
+object.
 
 =head1 METHODS
 
@@ -526,11 +556,19 @@ The different possibilities for this is listed in L</NAGIOS STATUSES>
 
 =item 0 OK
 
+C<< $Nagios::Plugin::OverHTTP::STATUS_OK >>
+
 =item 1 WARNING
+
+C<< $Nagios::Plugin::OverHTTP::STATUS_WARNING >>
 
 =item 2 CRITICAL
 
+C<< $Nagios::Plugin::OverHTTP::STATUS_CRITICAL >>
+
 =item 3 UNKNOWN
+
+C<< $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN >>
 
 =back
 
@@ -566,13 +604,15 @@ server.
 
 =item * L<Moose> 0.74
 
-=item * L<MooseX::Getopt>
+=item * L<MooseX::Getopt> 0.19
 
 =item * L<MooseX::StrictConstructor> 0.08
 
 =item * L<Readonly>
 
 =item * L<URI>
+
+=item * L<namespace::clean> 0.04
 
 =back
 
@@ -582,20 +622,17 @@ Douglas Christopher Wilson, C<< <doug at somethingdoug.com> >>
 
 =head1 BUGS AND LIMITATIONS
 
-C<new_with_options> does not support a single HASHREF argument. Waiting on fix
-in L<https://rt.cpan.org/Ticket/Display.html?id=46200>.
-
 Please report any bugs or feature requests to
-C<bug-authen-cas-external at rt.cpan.org>, or through the web interface at
-L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Authen-CAS-External>. I will
-be notified, and then you'll automatically be notified of progress on your bug
-as I make changes.
+C<bug-nagios-plugin-overhttp at rt.cpan.org>, or through the web interface at
+L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Nagios-Plugin-OverHTTP>. I
+will be notified, and then you'll automatically be notified of progress on your
+bug as I make changes.
 
 =head1 SUPPORT
 
 You can find documentation for this module with the perldoc command.
 
-perldoc Authen::CAS::External
+perldoc Nagios::Plugin::OverHTTP
 
 
 You can also look for information at:
@@ -604,19 +641,19 @@ You can also look for information at:
 
 =item * RT: CPAN's request tracker
 
-L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=Authen-CAS-External>
+L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=Nagios-Plugin-OverHTTP>
 
 =item * AnnoCPAN: Annotated CPAN documentation
 
-L<http://annocpan.org/dist/Authen-CAS-External>
+L<http://annocpan.org/dist/Nagios-Plugin-OverHTTP>
 
 =item * CPAN Ratings
 
-L<http://cpanratings.perl.org/d/Authen-CAS-External>
+L<http://cpanratings.perl.org/d/Nagios-Plugin-OverHTTP>
 
 =item * Search CPAN
 
-L<http://search.cpan.org/dist/Authen-CAS-External/>
+L<http://search.cpan.org/dist/Nagios-Plugin-OverHTTP/>
 
 =back
 

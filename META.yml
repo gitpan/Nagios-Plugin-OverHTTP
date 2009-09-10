@@ -20,6 +20,14 @@ no_index:
   directory:
     - inc
     - t
+    - xt
+provides:
+  Nagios::Plugin::OverHTTP:
+    file: lib/Nagios/Plugin/OverHTTP.pm
+    version: 0.09
+  Nagios::Plugin::OverHTTP::Library:
+    file: lib/Nagios/Plugin/OverHTTP/Library.pm
+    version: 0.08
 requires:
   Data::Validate::Domain: 0.02
   Data::Validate::URI: 0.05
@@ -27,16 +35,16 @@ requires:
   HTTP::Status: 5.817
   LWP::UserAgent: 0
   Moose: 0.74
-  MooseX::Getopt: 0.18
+  MooseX::Getopt: 0.19
   MooseX::StrictConstructor: 0.08
   MooseX::Types: 0.08
   Readonly: 0
   Scalar::Util: 1.19
   URI: 0
+  namespace::clean: 0.04
   perl: 5.8.1
-  version: 0.74
 resources:
   homepage: http://github.com/dougwilson/perl5-nagios-plugin-overhttp/tree/master
   license: http://dev.perl.org/licenses/
   repository: git://github.com/dougwilson/perl5-nagios-plugin-overhttp.git
-version: 0.08
+version: 0.09
