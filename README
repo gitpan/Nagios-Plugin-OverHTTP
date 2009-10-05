@@ -1,4 +1,4 @@
-Nagios-Plugin-OverHTTP version 0.10
+Nagios-Plugin-OverHTTP version 0.11
 ===================================
 
 See the individual module documentation for more information
@@ -11,6 +11,12 @@ To install this module, run the following commands:
 	make
 	make test
 	make install
+
+This module also comes with a check_over_http Nagios plugin, which is
+located in bin/ and you will want to copy that over to your Nagios
+plugins directory (usually /usr/local/libexec/nagios/)
+
+	cp bin/check_over_http /usr/local/libexec/nagios/
 
 SUPPORT AND DOCUMENTATION
 
