@@ -4,47 +4,62 @@ use 5.008001;
 use strict;
 use warnings 'all';
 
-# Module metadata
+###########################################################################
+# METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION = '0.11';
+our $VERSION   = '0.12';
 
-use Carp qw(croak);
-use HTTP::Status qw(:constants);
-use LWP::UserAgent;
+###########################################################################
+# MOOSE
 use Moose 0.74;
 use MooseX::StrictConstructor 0.08;
-use Nagios::Plugin::OverHTTP::Library qw(
+
+###########################################################################
+# MOOSE TYPES
+use Nagios::Plugin::OverHTTP::Library 0.12 qw(
 	Hostname
+	HTTPVerb
 	Path
 	Status
 	Timeout
 	URL
 );
-use Readonly;
+
+###########################################################################
+# MODULE IMPORTS
+use Carp qw(croak);
+use HTTP::Request 5.827;
+use HTTP::Status 5.817 qw(:constants);
+use LWP::UserAgent;
+use Readonly 1.03;
 use URI;
 
-# Clean the imports are the end of scope
+###########################################################################
+# ALL IMPORTS BEFORE THIS WILL BE ERASED
 use namespace::clean 0.04 -except => [qw(meta)];
 
+###########################################################################
+# MOOSE ROLES
 with 'MooseX::Getopt';
 
-# Constants
+###########################################################################
+# PUBLIC CONSTANTS
 Readonly our $STATUS_OK       => 0;
 Readonly our $STATUS_WARNING  => 1;
 Readonly our $STATUS_CRITICAL => 2;
 Readonly our $STATUS_UNKNOWN  => 3;
 
-# Attributes
-
+###########################################################################
+# ATTRIBUTES
 has 'autocorrect_unknown_html' => (
 	is            => 'rw',
 	isa           => 'Bool',
 	documentation => q{When a multiline HTML response without a status is }
-	                .q{received, this will add something meaningful to the first line},
+	                .q{received, this will add something meaningful to the}
+	                .q{ first line},
 
 	default       => 1,
 );
-
 has 'default_status' => (
 	is            => 'rw',
 	isa           => Status,
@@ -53,7 +68,6 @@ has 'default_status' => (
 	coerce        => 1,
 	default       => $STATUS_UNKNOWN,
 );
-
 has 'hostname' => (
 	is            => 'rw',
 	isa           => Hostname,
@@ -73,7 +87,6 @@ has 'hostname' => (
 		$self->_clear_url;
 	},
 );
-
 has 'message' => (
 	is            => 'ro',
 	isa           => 'Str',
@@ -84,7 +97,6 @@ has 'message' => (
 	predicate     => 'has_message',
 	traits        => ['NoGetopt'],
 );
-
 has 'path' => (
 	is            => 'rw',
 	isa           => Path,
@@ -105,7 +117,6 @@ has 'path' => (
 		$self->_clear_url;
 	},
 );
-
 has 'ssl' => (
 	is            => 'rw',
 	isa           => 'Bool',
@@ -125,7 +136,6 @@ has 'ssl' => (
 		$self->_clear_url;
 	},
 );
-
 has 'timeout' => (
 	is            => 'rw',
 	isa           => Timeout,
@@ -134,7 +144,6 @@ has 'timeout' => (
 	clearer       => 'clear_timeout',
 	predicate     => 'has_timeout',
 );
-
 has 'status' => (
 	is            => 'ro',
 	isa           => Status,
@@ -145,7 +154,6 @@ has 'status' => (
 	predicate     => 'has_status',
 	traits        => ['NoGetopt'],
 );
-
 has 'url' => (
 	is            => 'rw',
 	isa           => URL,
@@ -165,7 +173,6 @@ has 'url' => (
 		$self->_populate_from_url;
 	},
 );
-
 has 'useragent' => (
 	is            => 'rw',
 	isa           => 'LWP::UserAgent',
@@ -174,7 +181,16 @@ has 'useragent' => (
 	lazy          => 1,
 	traits        => ['NoGetopt'],
 );
+has 'verb' => (
+	is            => 'rw',
+	isa           => HTTPVerb,
+	documentation => q{Specifies the HTTP verb with which to make the request},
 
+	default       => 'GET',
+);
+
+###########################################################################
+# METHODS
 sub check {
 	my ($self) = @_;
 
@@ -187,8 +203,11 @@ sub check {
 		$self->useragent->timeout($self->timeout);
 	}
 
+	# Form the HTTP request
+	my $request = HTTP::Request->new($self->verb, $self->url);
+
 	# Get the response of the plugin
-	my $response = $self->useragent->get($self->url);
+	my $response = $self->useragent->request($request);
 
 	# Restore the previous timeout value to the useragent
 	$self->useragent->timeout($old_timeout);
@@ -217,26 +236,18 @@ sub check {
 		return;
 	}
 
-	# Get the message, which is the response content
-	my $message = $response->decoded_content;
+	# Get the message from the response
+	my $message = $self->_extract_message_from_response($response);
 
-	# By default we do not know the status
-	my $status;
-	my $status_header = $response->header('X-Nagios-Status');
-
-	if (defined $status_header) {
-		# Get the status from the header if present
-		$status = to_Status($status_header);
-	}
-	elsif (my ($inc_status) = $message =~ m{\A([A-Z]+)}msx) {
-		$status = to_Status($inc_status);
-	}
+	# Get the status from the response
+	my $status = $self->_extract_status_from_response($response);
 
 	if (!defined $status) {
 		# The status was not found in the response
 		$status = $self->default_status;
 
-		if ($self->autocorrect_unknown_html) {
+		if ($self->autocorrect_unknown_html
+			&& !defined $response->header('X-Nagios-Information')) {
 			# The setting is active to automatically correct unknown HTML
 			if ($message =~ m{\S+\s*[\r\n]+\s*\S+}msx) {
 				# This is a multi-line response.
@@ -267,10 +278,11 @@ sub check {
 		}
 	}
 
+	# Set the plugin state
 	$self->_set_state($status, $message);
+
 	return;
 }
-
 sub run {
 	my ($self) = @_;
 
@@ -281,6 +293,8 @@ sub run {
 	return $self->status;
 }
 
+###########################################################################
+# PRIVATE METHODS
 sub _build_hostname {
 	my ($self) = @_;
 
@@ -289,7 +303,6 @@ sub _build_hostname {
 
 	return $self->{hostname};
 }
-
 sub _build_message {
 	my ($self) = @_;
 
@@ -298,7 +311,6 @@ sub _build_message {
 
 	return $self->{message};
 }
-
 sub _build_path {
 	my ($self) = @_;
 
@@ -307,7 +319,6 @@ sub _build_path {
 
 	return $self->{path};
 }
-
 sub _build_ssl {
 	my ($self) = @_;
 
@@ -316,7 +327,6 @@ sub _build_ssl {
 
 	return $self->{ssl};
 }
-
 sub _build_status {
 	my ($self) = @_;
 
@@ -325,7 +335,6 @@ sub _build_status {
 
 	return $self->{status};
 }
-
 sub _build_url {
 	my ($self) = @_;
 
@@ -347,7 +356,6 @@ sub _build_url {
 	# Set the URL
 	return $url->as_string;
 }
-
 sub _clear_state {
 	my ($self) = @_;
 
@@ -357,7 +365,45 @@ sub _clear_state {
 	# Nothing useful to return, so chain
 	return $self;
 }
+sub _extract_message_from_response {
+	my ($self, $response) = @_;
 
+	my $message;
+
+	# First priority is the X-Nagios-Information header
+	if (defined $response->header('X-Nagios-Information')) {
+		# Set the message
+		$message = join qq{\n},
+			$response->header('X-Nagios-Information');
+	}
+	else {
+		# Otherwise the message is the body
+		$message = $response->decoded_content;
+	}
+
+	# Return the message
+	return $message;
+}
+sub _extract_status_from_response {
+	my ($self, $response) = @_;
+
+	# First priority is the X-Nagios-Status header
+	my $status = to_Status($response->header('X-Nagios-Status'));
+
+	if (!defined $status && !defined $response->header('X-Nagios-Information')) {
+		# Since X-Status-Information is not present, attempt to extract it
+		# from the body
+		my $message = $response->decoded_content;
+
+		if (my ($inc_status) = $message =~ m{\A ([A-Z]+)\b }msx) {
+			# Attempt to get the status from the first all-caps word
+			$status = to_Status($inc_status);
+		}
+	}
+
+	# Return the status
+	return $status;
+}
 sub _populate_from_url {
 	my ($self) = @_;
 
@@ -380,7 +426,6 @@ sub _populate_from_url {
 	# Nothing useful to return, so chain
 	return $self;
 }
-
 sub _set_state {
 	my ($self, $status, $message) = @_;
 
@@ -402,7 +447,8 @@ sub _set_state {
 	return $self;
 }
 
-# Make immutable
+###########################################################################
+# MAKE MOOSE OBJECT IMMUTABLE
 __PACKAGE__->meta->make_immutable;
 
 1;
@@ -415,7 +461,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.11
+Version 0.12
 
 =head1 SYNOPSIS
 
@@ -537,6 +583,13 @@ This is the useragent to use when making requests. This defaults to
 L<LWP::Useragent> with no options. Currently this must be an L<LWP::Useragent>
 object.
 
+=head2 verb
+
+B<Added in version 0.12>; be sure to require this version for this feature.
+
+This is the HTTP verb that will be used to make the HTTP request. The default
+value is C<GET>.
+
 =head1 METHODS
 
 =head2 check
@@ -574,8 +627,9 @@ will display the error code and the status message.
 
 =head2 HTTP BODY
 
-The body of the HTTP response will be the output of the plugin. To determine
-what the status code will be, the following methods are used:
+The body of the HTTP response will be the output of the plugin unless the
+header C<X-Nagios-Information> is present. To determine what the status code
+will be, the following methods are used:
 
 =over 4
 
@@ -594,6 +648,11 @@ of all capital letters is taken from the body and used to determine the result.
 The different possibilities for this is listed in L</NAGIOS STATUSES>
 
 =back
+
+Please note that if the header C<X-Nagios-Information> is present, then the
+status MUST be in the header C<X-Nagios-Status> as described above. The status
+will not be extracted from any text. The C<X-Nagios-Information> header support
+was added in version 0.12.
 
 =head2 NAGIOS STATUSES
 
@@ -643,7 +702,9 @@ server.
 
 =item * L<Carp>
 
-=item * L<HTTP::Status>
+=item * L<HTTP::Request> 5.827
+
+=item * L<HTTP::Status> 5.817
 
 =item * L<LWP::UserAgent>
 
@@ -653,7 +714,7 @@ server.
 
 =item * L<MooseX::StrictConstructor> 0.08
 
-=item * L<Readonly>
+=item * L<Readonly> 1.03
 
 =item * L<URI>
 
@@ -664,6 +725,15 @@ server.
 =head1 AUTHOR
 
 Douglas Christopher Wilson, C<< <doug at somethingdoug.com> >>
+
+=head1 ACKNOWLEDGEMENTS
+
+=over
+
+=item * Alex Wollangk contributed the idea and code for the
+C<X-Nagios-Information> header.
+
+=back
 
 =head1 BUGS AND LIMITATIONS
 
@@ -677,8 +747,7 @@ bug as I make changes.
 
 You can find documentation for this module with the perldoc command.
 
-perldoc Nagios::Plugin::OverHTTP
-
+  perldoc Nagios::Plugin::OverHTTP
 
 You can also look for information at:
 
@@ -702,13 +771,19 @@ L<http://search.cpan.org/dist/Nagios-Plugin-OverHTTP/>
 
 =back
 
-
-=head1 ACKNOWLEDGEMENTS
-
-
 =head1 LICENSE AND COPYRIGHT
 
 Copyright 2009 Douglas Christopher Wilson, all rights reserved.
 
-This program is free software; you can redistribute it and/or modify it
-under the same terms as Perl itself.
+This program is free software; you can redistribute it and/or
+modify it under the terms of either:
+
+=over
+
+=item * the GNU General Public License as published by the Free
+Software Foundation; either version 1, or (at your option) any
+later version, or
+
+=item * the Artistic License version 2.0.
+
+=back

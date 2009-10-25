@@ -4,33 +4,45 @@ use 5.008001;
 use strict;
 use warnings 'all';
 
-# Module metadata
+###########################################################################
+# METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION = '0.11';
+our $VERSION   = '0.12';
 
+###########################################################################
+# MOOSE
 use MooseX::Types 0.08 -declare => [qw(
 	Hostname
+	HTTPVerb
 	Path
 	Status
 	Timeout
 	URL
 )];
 
+###########################################################################
+# MOOSE TYPES
+use MooseX::Types::Moose qw(Int Str);
+
+###########################################################################
+# MODULE IMPORTS
 use Data::Validate::Domain 0.02;
 use Data::Validate::URI 0.05;
 use Nagios::Plugin::OverHTTP;
 
-# Import built-in types
-use MooseX::Types::Moose qw(Int Str);
-
-# Clean the imports are the end of scope
+###########################################################################
+# ALL IMPORTS BEFORE THIS WILL BE ERASED
 use namespace::clean 0.04 -except => [qw(meta)];
 
-# Type definitions
+###########################################################################
+# TYPES DEFINITIONS
 subtype Hostname,
 	as Str,
 	where { Data::Validate::Domain::is_hostname($_) },
 	message { 'Must be a valid hostname' };
+
+enum HTTPVerb,
+	qw(DELETE GET HEAD OPTIONS POST PUT TRACE);
 
 subtype Path,
 	as Str,
@@ -61,6 +73,8 @@ coerce Status,
 	from Str,
 		via { _status_from_str($_) };
 
+###########################################################################
+# PRIVATE FUNCTIONS
 sub _status_from_str {
 	my ($status_string) = @_;
 
@@ -93,7 +107,7 @@ L<Nagios::Plugin::OverHTTP>
 
 =head1 VERSION
 
-This documentation refers to <Nagios::Plugin::OverHTTP::Library> version 0.11
+This documentation refers to <Nagios::Plugin::OverHTTP::Library> version 0.12
 
 =head1 SYNOPSIS
 
@@ -115,6 +129,13 @@ No methods.
 
 This specifies a hostname. This is validated using the
 L<Data::Validate::Domain> library with the C<is_hostname> function.
+
+=head2 HTTPVerb
+
+B<Added in version 0.12>; be sure to require this version for this feature.
+
+This specifies a HTTP verb. THis must be in all capital letters and all verbs
+are valid.
 
 =head2 Path
 
@@ -182,5 +203,15 @@ bug as I make changes.
 
 Copyright 2009 Douglas Christopher Wilson, all rights reserved.
 
-This program is free software; you can redistribute it and/or modify it
-under the same terms as Perl itself.
+This program is free software; you can redistribute it and/or
+modify it under the terms of either:
+
+=over
+
+=item * the GNU General Public License as published by the Free
+Software Foundation; either version 1, or (at your option) any
+later version, or
+
+=item * the Artistic License version 2.0.
+
+=back

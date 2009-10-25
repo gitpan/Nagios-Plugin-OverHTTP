@@ -1,13 +1,15 @@
 #!perl -T
 
+use 5.008;
 use strict;
 use warnings 'all';
 
 use HTTP::Response;
+use HTTP::Status 5.817 qw(:constants);
 use Test::More 0.82;
 use Test::MockObject;
 
-plan tests => 62;
+plan tests => 96;
 
 # Create a mock LWP::UserAgent
 my $fake_ua = Test::MockObject->new;
@@ -15,47 +17,156 @@ $fake_ua->set_isa('LWP::UserAgent');
 
 use Nagios::Plugin::OverHTTP;
 
-$fake_ua->mock('get', sub {
-	my ($self, $url) = @_;
+my %test = (
+	'simple_ok' => {
+		description => 'Simple OK test',
+		body        => 'OK - I am simple',
+		status      => $Nagios::Plugin::OverHTTP::STATUS_OK,
+	},
+	'simple_warning' => {
+		description => 'Simple WARNING test',
+		body        => 'WARNING - I am simple',
+		status      => $Nagios::Plugin::OverHTTP::STATUS_WARNING,
+	},
+	'simple_critical' => {
+		description => 'Simple CRITICAL test',
+		body        => 'CRITICAL - I am simple',
+		status      => $Nagios::Plugin::OverHTTP::STATUS_CRITICAL,
+	},
+	'simple_unknown' => {
+		description => 'Simple UNKNOWN test',
+		body        => 'UNKNOWN - I am simple',
+		status      => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+	},
+	'500_status' => {
+		description => '500 status',
+		body_like   => qr{\A CRITICAL\b}msx,
+		http_body   => 'Error.',
+		http_status => HTTP_INTERNAL_SERVER_ERROR,
+		status      => $Nagios::Plugin::OverHTTP::STATUS_CRITICAL,
+	},
+	'no_status' => {
+		description => 'No status',
+		body_like   => qr//,
+		status      => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+	},
+	'header_status' => {
+		description  => 'Header status',
+		body         => qr/OK - I am really a warning/,
+		status       => $Nagios::Plugin::OverHTTP::STATUS_WARNING,
+		http_body    => 'OK - I am really a warning',
+		http_headers => [ ['X-Nagios-Status' => 'WARNING'] ],
+	},
+	'header_status_numeric' => {
+		description  => 'Header status numeric',
+		body         => qr/OK - I am really a warning/,
+		status       => $Nagios::Plugin::OverHTTP::STATUS_WARNING,
+		http_body    => 'OK - I am really a warning',
+		http_headers => [ ['X-Nagios-Status' => 1] ],
+	},
+	'no_status_html_recover' => {
+		description => 'No status and strange HTML',
+		body_like   => qr/I am title$/m,
+		status      => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+		http_body   => "<html>\n<title>I am title</title>\n</html>",
+	},
+	'header_message' => {
+		description  => 'Message in header',
+		body_like    => qr/I am a header message/,
+		status       => $Nagios::Plugin::OverHTTP::STATUS_OK,
+		http_body    => 'I am junk, not a message :(',
+		http_headers => [
+			['X-Nagios-Information' => 'I am a header message'],
+			['X-Nagios-Status'      => 'OK'                   ],
+		],
+	},
+	'header_message_multiline' => {
+		description  => 'Multiline message in header',
+		body         => "OK - I am a header message\nSecond line",
+		status       => $Nagios::Plugin::OverHTTP::STATUS_OK,
+		http_body    => 'I am junk, not a message :(',
+		http_headers => [
+			['X-Nagios-Information' => 'I am a header message'],
+			['X-Nagios-Information' => 'Second line'          ],
+			['X-Nagios-Status'      => 'OK'                   ],
+		],
+	},
+	'header_message_no_status' => {
+		description  => 'Message in header without any status',
+		body_like    => qr/I am a header message/,
+		status       => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+		http_body    => 'I am junk, not a message :(',
+		http_headers => [
+			['X-Nagios-Information' => 'I am a header message'],
+		],
+	},
+	'header_message_ignore_body' => {
+		description  => 'Message in header ignoring body',
+		body_like    => qr/I am a header message/,
+		status       => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+		http_body    => 'OK - I am junk, not a message :(',
+		http_headers => [
+			['X-Nagios-Information' => 'I am a header message'],
+		],
+	},
+	'header_message_no_status_word' => {
+		description  => 'Message in header with status word ignored',
+		body_like    => qr/I am a header message/,
+		status       => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+		http_body    => 'I am junk, not a message :(',
+		http_headers => [
+			['X-Nagios-Information' => 'OK - I am a header message'],
+		],
+	},
+	'GET_only_for_get' => {
+		description => 'Page only exists for GET',
+		body        => 'OK - I am GET',
+		status      => $Nagios::Plugin::OverHTTP::STATUS_OK,
+	},
+	'HEAD_only_for_head' => {
+		description => 'Page only exists for HEAD',
+		body_like   => qr/I am HEAD/,
+		status      => $Nagios::Plugin::OverHTTP::STATUS_OK,
+		http_headers => [
+			['X-Nagios-Information' => 'I am HEAD'],
+			['X-Nagios-Status'      => 'OK'       ],
+		],
+	},
+);
 
-	my $time_start = time;
+$fake_ua->mock('request', sub {
+	my ($self, $request) = @_;
 
-	($url) = $url =~ m{/(\w+)\z}msx;
-	my $res;
+	# Change URL to everything after last /
+	my ($url) = $request->uri =~ m{/ (\w+) \z}msx;
 
-	if ($url =~ m{_([A-Z]+)\z}msx) {
-		$res = HTTP::Response->new(200, 'OK', undef, "$1 - I am something");
-	}
-	elsif ($url =~ m{_(\d{3})\z}msx) {
-		$res = HTTP::Response->new($1, 'Some status', undef, 'OK - I am some result');
-	}
-	elsif ($url =~ m{_time_(\d+)\z}msx) {
-		sleep $1;
-		$res = HTTP::Response->new(200, 'Some status', undef, 'OK - I am some result');
-	}
-	elsif ($url =~ m{_(\d)_header\z}msx) {
-		$res = HTTP::Response->new(200, 'Some status', undef, 'I am some result');
-		$res->header('X-Nagios-Status' => $1);
-	}
-	elsif ($url eq 'check_ok_header') {
-		$res = HTTP::Response->new(200, 'OK', undef, 'OK - I am good');
-		$res->header('X-Nagios-Status' => 'WARNING');
-	}
-	elsif ($url =~ m{_no_status\z}msx) {
-		$res = HTTP::Response->new(200, 'Some status', undef, 'I have no status');
-	}
-	elsif ($url =~ m{_no_status_html\z}msx) {
-		$res = HTTP::Response->new(200, 'Some status', undef, "<html>\n<title>I am title</title>\n</html>");
+	# Get the test
+	my $test = $test{sprintf('%s_%s', $request->method, $url)} || $test{$url};
+
+	if (defined $test) {
+		my $http_status = $test->{http_status} || HTTP_OK;
+		my $http_body   = $test->{http_body  } || $test->{body};
+
+		# Construct a response
+		my $response = HTTP::Response->new(
+			$http_status,
+			HTTP::Status::status_message($http_status),
+			undef,
+			$http_body,
+		);
+
+		if (exists $test->{http_headers}) {
+			foreach my $header (@{ $test->{http_headers} }) {
+				# Set the header in the response
+				$response->headers->push_header(@{$header});
+			}
+		}
+
+		return $response;
 	}
 	else {
-		$res = HTTP::Response->new(404, 'Not Found');
+		return HTTP::Response->new(404, 'Not Found');
 	}
-
-	if (time - $time_start > $self->timeout) {
-		$res = HTTP::Response->new(500, 'read timeout', undef, '500 read timeout');
-	}
-
-	return $res;
 });
 $fake_ua->mock('timeout', sub {
 	my ($self, $timeout) = @_;
@@ -80,33 +191,31 @@ isnt($plugin->has_status, 1, 'Has no status yet');
 is($plugin->status, 3, 'Nonexistant plugin has UNKNOWN status');
 like($plugin->message, qr/\A UNKNOWN .+ Not \s Found/msx, 'Nonexistant plugin message');
 
-check_url($plugin, 'http://example.net/nagios/check_OK'       , $Nagios::Plugin::OverHTTP::STATUS_OK      , 'OK - I am something'      , 'OK');
-check_url($plugin, 'http://example.net/nagios/check_WARNING'  , $Nagios::Plugin::OverHTTP::STATUS_WARNING , 'WARNING - I am something' , 'WARNING');
-check_url($plugin, 'http://example.net/nagios/check_CRITICAL' , $Nagios::Plugin::OverHTTP::STATUS_CRITICAL, 'CRITICAL - I am something', 'CRITICAL');
-check_url($plugin, 'http://example.net/nagios/check_UNKNOWN'  , $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN , 'UNKNOWN - I am something' , 'UNKNOWN');
-check_url($plugin, 'http://example.net/nagios/check_500'      , $Nagios::Plugin::OverHTTP::STATUS_CRITICAL, qr/\ACRITICAL/msx          , '500');
-check_url($plugin, 'http://example.net/nagios/check_ok_header', $Nagios::Plugin::OverHTTP::STATUS_WARNING , qr/\AWARNING - OK/ms       , 'Header override');
-check_url($plugin, 'http://example.net/nagios/check_2_header' , $Nagios::Plugin::OverHTTP::STATUS_CRITICAL, qr//ms                     , 'Numberic header');
+###########################################################################
+# CHECK
+foreach my $test_url (sort keys %test) {
+	# Check the URL
+	check_url(
+		$plugin,
+		"http://example.net/$test_url",
+		$test{$test_url}->{status},
+		$test{$test_url}->{body  } || $test{$test_url}->{body_like},
+		$test{$test_url}->{description},
+	);
+}
 
-##############################
-# NO STATUS TESTS
-check_url($plugin, 'http://example.net/nagios/check_no_status', $plugin->default_status,  qr//ms, 'no status');
-$plugin->default_status('critical');
-check_url($plugin, 'http://example.net/nagios/check_no_status'     , $Nagios::Plugin::OverHTTP::STATUS_CRITICAL,  qr//ms                     , 'no status critical');
-check_url($plugin, 'http://example.net/nagios/check_no_status_html', $Nagios::Plugin::OverHTTP::STATUS_CRITICAL,  qr/CRITICAL - I am title/ms, 'no status html fix');
+###########################################################################
+# CHECK THE DEFAULT STATUS
+{
+	# Check that it is the default
+	check_url($plugin, 'http://example.net/nagios/no_status', $plugin->default_status, qr//ms, 'No status is default');
 
-##############################
-# TIMEOUT TESTS
-isnt($plugin->has_timeout, 1, 'Has not timeout yet');
-$plugin->timeout(10);
-is($plugin->has_timeout, 1, 'Has timeout');
-is($plugin->timeout, 10, 'Timeout set');
-$plugin->url('http://example.net/nagios/check_time_15');
-is($plugin->status, 2, 'Timeout should be CRITICAL');
-$plugin->url('http://example.net/nagios/check_time_6');
-is($plugin->status, 0, 'Timeout did not occur');
-$plugin->clear_timeout;
-isnt($plugin->has_timeout, 1, 'Timeout cleared');
+	# Change the default
+	$plugin->default_status('critical');
+
+	# Check that it is the new default
+	check_url($plugin, 'http://example.net/nagios/no_status', $Nagios::Plugin::OverHTTP::STATUS_CRITICAL, qr//ms, 'No status successfully critical');
+}
 
 exit 0;
 
@@ -117,16 +226,16 @@ sub check_url {
 	$plugin->url($url);
 
 	# Make sure it was changed
-	is($plugin->url, $url, "[$name] URL was set");
-	isnt($plugin->has_message, 1, "[$name] Has no message yet");
-	isnt($plugin->has_status, 1, "[$name] Has no status yet");
-	is($plugin->status, $status, "[$name] Status is correct");
+	is   $plugin->url        , $url   , "$name: URL was set";
+	isnt $plugin->has_message, 1      , "$name: Has no message yet";
+	isnt $plugin->has_status , 1      , "$name: Has no status yet";
+	is   $plugin->status     , $status, "$name: Status is correct";
 
 	if (ref $message eq 'Regexp') {
-		like($plugin->message, $message, "[$name] Message is correct");
+		like $plugin->message, $message, "$name: Message is correct";
 	}
 	else {
-		is($plugin->message, $message, "[$name] Message is correct");
+		is $plugin->message, $message, "$name: Message is correct";
 	}
 
 	return $plugin->status, $plugin->message;
