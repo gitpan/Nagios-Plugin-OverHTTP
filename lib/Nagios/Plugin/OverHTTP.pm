@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.13';
+our $VERSION   = '0.13_001';
 
 ###########################################################################
 # MOOSE
@@ -31,6 +31,7 @@ use Carp qw(croak);
 use HTTP::Request 5.827;
 use HTTP::Status 5.817 qw(:constants);
 use LWP::UserAgent;
+use Nagios::Plugin::OverHTTP::PerformanceData;
 use Readonly 1.03;
 use URI;
 
@@ -59,6 +60,14 @@ has 'autocorrect_unknown_html' => (
 	                .q{ first line},
 
 	default       => 1,
+);
+has 'critical' => (
+	is            => 'rw',
+	isa           => 'HashRef[Str]',
+	documentation => q{Specifies performance levels that result in a }
+	                .q{critical status},
+
+	default       => sub { {} },
 );
 has 'default_status' => (
 	is            => 'rw',
@@ -116,6 +125,14 @@ has 'path' => (
 		# Clear the URL
 		$self->_clear_url;
 	},
+);
+has 'performance_data' => (
+	is            => 'ro',
+	isa           => 'ArrayRef',
+	documentation => q{Array of performance data from the plugin},
+
+	clearer       => '_clear_performance_data',
+	predicate     => 'has_performance_data',
 );
 has 'ssl' => (
 	is            => 'rw',
@@ -188,49 +205,42 @@ has 'verb' => (
 
 	default       => 'GET',
 );
+has 'warning' => (
+	is            => 'rw',
+	isa           => 'HashRef[Str]',
+	documentation => q{Specifies performance levels that result in a }
+	                .q{warning status},
+
+	default       => sub { {} },
+);
 
 ###########################################################################
 # METHODS
 sub check {
 	my ($self) = @_;
 
-	# Save the current timeout for the useragent
-	my $old_timeout = $self->useragent->timeout;
-
-	# Set the useragent's timeout to our timeout
-	# if a timeout has been declared.
-	if ($self->has_timeout) {
-		$self->useragent->timeout($self->timeout);
-	}
-
-	# Form the HTTP request
-	my $request = HTTP::Request->new($self->verb, $self->url);
-
 	# Get the response of the plugin
-	my $response = $self->useragent->request($request);
+	my $response = $self->_request;
 
-	# Restore the previous timeout value to the useragent
-	$self->useragent->timeout($old_timeout);
+	if (!$response->is_success) {
+		if ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message eq 'read timeout') {
+			# Failure due to timeout
+			my $timeout = $self->has_timeout ? $self->timeout : $self->useragent->timeout;
 
-	## no critic (ControlStructures::ProhibitCascadingIfElse)
-	if ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message eq 'read timeout') {
-		# Failure due to timeout
-		my $timeout = $self->has_timeout ? $self->timeout : $self->useragent->timeout;
+			$self->_set_state($STATUS_CRITICAL, sprintf 'Socket timeout after %d seconds', $timeout);
+			return;
+		}
+		elsif ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message =~ m{\(connect: \s timeout\)}msx) {
+			# Failure to connect to the host server
+			$self->_set_state($STATUS_CRITICAL, 'Connection refused ');
+			return;
+		}
+		elsif (HTTP::Status::is_server_error($response->code)) {
+			# There was some type of internal error
+			$self->_set_state($STATUS_CRITICAL, $response->status_line);
+			return;
+		}
 
-		$self->_set_state($STATUS_CRITICAL, sprintf 'Socket timeout after %d seconds', $timeout);
-		return;
-	}
-	elsif ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message =~ m{\(connect: \s timeout\)}msx) {
-		# Failure to connect to the host server
-		$self->_set_state($STATUS_CRITICAL, 'Connection refused ');
-		return;
-	}
-	elsif (HTTP::Status::is_server_error($response->code)) {
-		# There was some type of internal error
-		$self->_set_state($STATUS_CRITICAL, $response->status_line);
-		return;
-	}
-	elsif (!$response->is_success) {
 		# The response was not a success
 		$self->_set_state($STATUS_UNKNOWN, $response->status_line);
 		return;
@@ -273,6 +283,35 @@ sub check {
 						# message
 						$message = sprintf "%s\n%s", $h1, $message;
 					}
+				}
+			}
+		}
+	}
+
+	#XXX: Fix later
+	if ($self->has_performance_data) {
+		DATA:
+		foreach my $data (@{$self->performance_data}) {
+			my $label = $data->label;
+
+			if ($status != $STATUS_CRITICAL
+			    && exists $self->critical->{$label}) {
+				# Check for critical since not critical already
+				if ($data->is_within_range($self->critical->{$label})) {
+					# Set new status to critical
+					$status = $STATUS_CRITICAL;
+
+					# Since this is the worst status, stop here
+					last DATA;
+				}
+			}
+			if ($status != $STATUS_WARNING
+			    && $status != $STATUS_CRITICAL
+			    && exists $self->warning->{$label}) {
+				# Check for warning since not warning or critical already
+				if ($data->is_within_range($self->warning->{$label})) {
+					# Set new status to warning
+					$status = $STATUS_WARNING;
 				}
 			}
 		}
@@ -379,6 +418,38 @@ sub _extract_message_from_response {
 	else {
 		# Otherwise the message is the body
 		$message = $response->decoded_content;
+
+		# XXX: Fix this in a later refactor
+		if ($message =~ m{\|}msx) {
+			# Looks like there is performance data to parse somewhere
+			my @message_lines = split m{\v}msx, $message;
+
+			# Get the data from the first line
+			my (undef, $data) = split m{\|}msx, $message_lines[0];
+
+			# Search through the other lines for long performance data
+			LINE:
+			foreach my $line (1..$#message_lines) {
+				if ($message_lines[$line] =~ m{\| (\V+)}msx) {
+					# This line starts the long performance data
+					my $long_data = join q{ }, $1,
+						@message_lines[($line+1)..$#message_lines];
+
+					$data = defined $data ? "$data $long_data" : $long_data;
+
+					last LINE;
+				}
+			}
+
+			if (defined $data) {
+				# Parse all the performance data
+				my @data = map { Nagios::Plugin::OverHTTP::PerformanceData->new($_) }
+					Nagios::Plugin::OverHTTP::PerformanceData->split_performance_string($data);
+
+				# Set attribute
+				$self->{performance_data} = \@data;
+			}
+		}
 	}
 
 	# Return the message
@@ -426,6 +497,30 @@ sub _populate_from_url {
 	# Nothing useful to return, so chain
 	return $self;
 }
+sub _request {
+	my ($self) = @_;
+
+	# Save the current timeout for the useragent
+	my $old_timeout = $self->useragent->timeout;
+
+	# Set the useragent's timeout to our timeout
+	# if a timeout has been declared.
+	if ($self->has_timeout) {
+		$self->useragent->timeout($self->timeout);
+	}
+
+	# Form the HTTP request
+	my $request = HTTP::Request->new($self->verb, $self->url);
+
+	# Get the response of the plugin
+	my $response = $self->useragent->request($request);
+
+	# Restore the previous timeout value to the useragent
+	$self->useragent->timeout($old_timeout);
+
+	# Return the response
+	return $response;
+}
 sub _set_state {
 	my ($self, $status, $message) = @_;
 
@@ -461,7 +556,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.13
+Version 0.13_001
 
 =head1 SYNOPSIS
 
@@ -517,9 +612,12 @@ Arguments should be in the following format on the command line:
   --url http://example.net/check_something
   # Note that quotes may be used, based on your shell environment
 
-  # For bools, like SSL, you would use:
+  # For Booleans, like SSL, you would use:
   --ssl    # Enable SSL
   --no-ssl # Disable SSL
+
+  # For HashRefs, like warning and critical, you would use:
+  --warning name=value --warning name2=value2
 
 =head1 ATTRIBUTES
 
@@ -538,6 +636,14 @@ the message when the HTTP response did not include the Nagios plugin status
 and the message looks like HTML and has multiple lines. The title of the web
 page will be added to the first line, or the first H1 element will. The default
 for this is on.
+
+=head2 critical
+
+B<Added in version 0.14>; be sure to require this version for this feature.
+
+This is a hash reference specifying different performance names (as the hash
+keys) and what threshold they need to be to result in a critical status. The
+format for the threshold is specified in L</PERFORMANCE THRESHOLD>.
 
 =head2 default_status
 
@@ -590,6 +696,14 @@ B<Added in version 0.12>; be sure to require this version for this feature.
 This is the HTTP verb that will be used to make the HTTP request. The default
 value is C<GET>.
 
+=head2 warning
+
+B<Added in version 0.14>; be sure to require this version for this feature.
+
+This is a hash reference specifying different performance names (as the hash
+keys) and what threshold they need to be to result in a warning status. The
+format for the threshold is specified in L</PERFORMANCE THRESHOLD>.
+
 =head1 METHODS
 
 =head2 check
@@ -606,6 +720,40 @@ following:
   my $plugin = Plugin::Nagios::OverHTTP->new_with_options;
 
   exit $plugin->run;
+
+=head1 PERFORMANCE THRESHOLD
+
+Anywhere a performance threshold is accepted, the threshold value can be in any
+of the following formats (same as listed in
+L<http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT>):
+
+=over 4
+
+=item C<< <number> >>
+
+This will cause an alert if the level is less than zero or greater than
+C<< <number> >>.
+
+=item C<< <number>: >>
+
+This will cause an alert if the level is less than C<< <number> >>.
+
+=item C<< ~:<number> >>
+
+This will cause an alert if the level is greater than C<< <number> >>.
+
+=item C<< <number>:<number2> >>
+
+This will cause an alert if the level is less than C<< <number> >> or greater
+than C<< <number2> >>.
+
+=item C<< @<number>:<number2> >>
+
+This will cause an alert if the level is greater than or equal to
+C<< <number> >> and less than or equal to C<< <number2> >>. This is basically
+the exact opposite of the previous format.
+
+=back
 
 =head1 PROTOCOL
 
@@ -682,18 +830,18 @@ The following is an example of a simple bootstrapping of a plugin on a remote
 server.
 
   #!/usr/bin/env perl
-  
+
   use strict;
   use warnings;
-  
+
   my $output = qx{/usr/local/libexec/nagios/check_users2 -w 100 -c 500};
-  
+
   my $status = $? > 0 ? $? >> 8 : 3;
-  
-  printf "X-Nagios-Header: %d\n", $status;
+
+  printf "X-Nagios-Status: %d\n", $status;
   print  "Content-Type: text/plain\n\n";
   print  $output if $output;
-  
+
   exit 0;
 
 =head1 DEPENDENCIES
