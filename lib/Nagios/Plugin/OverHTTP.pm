@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.13_001';
+our $VERSION   = '0.13_002';
 
 ###########################################################################
 # MOOSE
@@ -51,6 +51,12 @@ Readonly our $STATUS_CRITICAL => 2;
 Readonly our $STATUS_UNKNOWN  => 3;
 
 ###########################################################################
+# PRIVATE CONSTANTS
+Readonly my $HEADER_MESSAGE     => 'X-Nagios-Information';
+Readonly my $HEADER_PERFORMANCE => 'X-Nagios-Performance';
+Readonly my $HEADER_STATUS      => 'X-Nagios-Status';
+
+###########################################################################
 # ATTRIBUTES
 has 'autocorrect_unknown_html' => (
 	is            => 'rw',
@@ -86,15 +92,7 @@ has 'hostname' => (
 	clearer       => '_clear_hostname',
 	lazy          => 1,
 	predicate     => '_has_hostname',
-	trigger       => sub {
-		my ($self) = @_;
-
-		# Clear the state
-		$self->_clear_state;
-
-		# Clear the URL
-		$self->_clear_url;
-	},
+	trigger       => \&_reset_trigger,
 );
 has 'message' => (
 	is            => 'ro',
@@ -116,15 +114,7 @@ has 'path' => (
 	coerce        => 1,
 	lazy          => 1,
 	predicate     => '_has_path',
-	trigger       => sub {
-		my ($self) = @_;
-
-		# Clear the state
-		$self->_clear_state;
-
-		# Clear the URL
-		$self->_clear_url;
-	},
+	trigger       => \&_reset_trigger,
 );
 has 'performance_data' => (
 	is            => 'ro',
@@ -143,15 +133,7 @@ has 'ssl' => (
 	clearer       => '_clear_ssl',
 	lazy          => 1,
 	predicate     => '_has_ssl',
-	trigger       => sub {
-		my ($self) = @_;
-
-		# Clear the state
-		$self->_clear_state;
-
-		# Clear the URL
-		$self->_clear_url;
-	},
+	trigger       => \&_reset_trigger,
 );
 has 'timeout' => (
 	is            => 'rw',
@@ -222,35 +204,50 @@ sub check {
 	# Get the response of the plugin
 	my $response = $self->_request;
 
-	if (!$response->is_success) {
-		if ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message eq 'read timeout') {
-			# Failure due to timeout
-			my $timeout = $self->has_timeout ? $self->timeout : $self->useragent->timeout;
+	if (!_response_contains_plugin_output($response)) {
+		# Get the response error information
+		my ($status, $message) = $self->_response_error_information($response);
 
-			$self->_set_state($STATUS_CRITICAL, sprintf 'Socket timeout after %d seconds', $timeout);
-			return;
-		}
-		elsif ($response->code == HTTP_INTERNAL_SERVER_ERROR && $response->message =~ m{\(connect: \s timeout\)}msx) {
-			# Failure to connect to the host server
-			$self->_set_state($STATUS_CRITICAL, 'Connection refused ');
-			return;
-		}
-		elsif (HTTP::Status::is_server_error($response->code)) {
-			# There was some type of internal error
-			$self->_set_state($STATUS_CRITICAL, $response->status_line);
-			return;
-		}
+		# Set the new state
+		$self->_set_state($status, $message);
 
-		# The response was not a success
-		$self->_set_state($STATUS_UNKNOWN, $response->status_line);
+		# End check early
 		return;
 	}
 
-	# Get the message from the response
-	my $message = $self->_extract_message_from_response($response);
+	# Default status and message
+	my ($status, $message);
 
-	# Get the status from the response
-	my $status = $self->_extract_status_from_response($response);
+	# Default performance data
+	my @performance_data = ();
+
+	if (_should_parse_body($response)) {
+		# Parse the body
+		$self->_parse_response_body($response,
+			\$status, \$message, \@performance_data # Parse alters these
+		);
+	}
+
+	if (defined $response->header($HEADER_MESSAGE)) {
+		# The message will be from the header
+		$message = join qq{\n},
+			$response->header($HEADER_MESSAGE);
+	}
+
+	if (defined $response->header($HEADER_STATUS)) {
+		# The status will be from the header
+		$status = to_Status($response->header($HEADER_STATUS));
+	}
+
+	if (defined $response->header($HEADER_PERFORMANCE)) {
+		# Add additional performance metrics
+		my $header_data = join q{ }, $response->header($HEADER_PERFORMANCE);
+
+		# Push
+		push @performance_data,
+			map { Nagios::Plugin::OverHTTP::PerformanceData->new($_) }
+				Nagios::Plugin::OverHTTP::PerformanceData->split_performance_string($header_data);
+	}
 
 	if (!defined $status) {
 		# The status was not found in the response
@@ -289,36 +286,37 @@ sub check {
 	}
 
 	#XXX: Fix later
-	if ($self->has_performance_data) {
-		DATA:
-		foreach my $data (@{$self->performance_data}) {
-			my $label = $data->label;
+	DATA:
+	foreach my $data (@performance_data) {
+		my $label = $data->label;
 
-			if ($status != $STATUS_CRITICAL
-			    && exists $self->critical->{$label}) {
-				# Check for critical since not critical already
-				if ($data->is_within_range($self->critical->{$label})) {
-					# Set new status to critical
-					$status = $STATUS_CRITICAL;
+		if ($status != $STATUS_CRITICAL
+			&& exists $self->critical->{$label}) {
+			# Check for critical since not critical already
+			if ($data->is_within_range($self->critical->{$label})) {
+				# Set new status to critical
+				$status = $STATUS_CRITICAL;
 
-					# Since this is the worst status, stop here
-					last DATA;
-				}
+				# Since this is the worst status, stop here
+				last DATA;
 			}
-			if ($status != $STATUS_WARNING
-			    && $status != $STATUS_CRITICAL
-			    && exists $self->warning->{$label}) {
-				# Check for warning since not warning or critical already
-				if ($data->is_within_range($self->warning->{$label})) {
-					# Set new status to warning
-					$status = $STATUS_WARNING;
-				}
+		}
+		if ($status != $STATUS_WARNING
+			&& $status != $STATUS_CRITICAL
+			&& exists $self->warning->{$label}) {
+			# Check for warning since not warning or critical already
+			if ($data->is_within_range($self->warning->{$label})) {
+				# Set new status to warning
+				$status = $STATUS_WARNING;
 			}
 		}
 	}
 
 	# Set the plugin state
 	$self->_set_state($status, $message);
+
+	# Set the performance data
+	$self->{performance_data} = \@performance_data;
 
 	return;
 }
@@ -334,45 +332,38 @@ sub run {
 
 ###########################################################################
 # PRIVATE METHODS
-sub _build_hostname {
-	my ($self) = @_;
+sub _build_after_check {
+	my ($self, $attribute) = @_;
 
-	# Build the hostname off the URL
+	# Preform the check
+	$self->check;
+
+	# Return the specified attribute for build
+	return $self->{$attribute};
+}
+sub _build_from_url {
+	my ($self, $attribute) = @_;
+
+	# Populate all fields from the URL
 	$self->_populate_from_url;
 
-	return $self->{hostname};
+	# Return the specified attribute for build
+	return $self->{$attribute};
+}
+sub _build_hostname {
+	return shift->_build_from_url('hostname');
 }
 sub _build_message {
-	my ($self) = @_;
-
-	# Preform the check
-	$self->check;
-
-	return $self->{message};
+	return shift->_build_after_check('message');
 }
 sub _build_path {
-	my ($self) = @_;
-
-	# Build the path off the URL
-	$self->_populate_from_url;
-
-	return $self->{path};
+	return shift->_build_from_url('path');
 }
 sub _build_ssl {
-	my ($self) = @_;
-
-	# Build the SSL off the URL
-	$self->_populate_from_url;
-
-	return $self->{ssl};
+	return shift->_build_from_url('ssl');
 }
 sub _build_status {
-	my ($self) = @_;
-
-	# Preform the check
-	$self->check;
-
-	return $self->{status};
+	return shift->_build_after_check('status');
 }
 sub _build_url {
 	my ($self) = @_;
@@ -404,76 +395,50 @@ sub _clear_state {
 	# Nothing useful to return, so chain
 	return $self;
 }
-sub _extract_message_from_response {
-	my ($self, $response) = @_;
+sub _parse_response_body {
+	my ($self, $response, $status_r, $message_r, $performance_data_r) = @_;
 
-	my $message;
+	# Set the message to the decoded content body
+	${$message_r} = $response->decoded_content;
 
-	# First priority is the X-Nagios-Information header
-	if (defined $response->header('X-Nagios-Information')) {
-		# Set the message
-		$message = join qq{\n},
-			$response->header('X-Nagios-Information');
+	# Parse for the status code
+	if (${$message_r} =~ m{\A (?:[^a-z]+ \s+)? (OK|WARNING|CRITICAL|UNKNOWN)}msx) {
+		# Found the status
+		${$status_r} = to_Status($1);
 	}
-	else {
-		# Otherwise the message is the body
-		$message = $response->decoded_content;
 
-		# XXX: Fix this in a later refactor
-		if ($message =~ m{\|}msx) {
-			# Looks like there is performance data to parse somewhere
-			my @message_lines = split m{\v}msx, $message;
+	if (${$message_r} =~ m{\|}msx) {
+		# Looks like there is performance data to parse somewhere
+		my @message_lines = split m{[\r\n]{1,2}}msx, ${$message_r};
 
-			# Get the data from the first line
-			my (undef, $data) = split m{\|}msx, $message_lines[0];
+		# Get the data from the first line
+		my (undef, $data) = split m{\|}msx, $message_lines[0];
 
-			# Search through the other lines for long performance data
-			LINE:
-			foreach my $line (1..$#message_lines) {
-				if ($message_lines[$line] =~ m{\| (\V+)}msx) {
-					# This line starts the long performance data
-					my $long_data = join q{ }, $1,
-						@message_lines[($line+1)..$#message_lines];
+		# Search through the other lines for long performance data
+		LINE:
+		foreach my $line (1..$#message_lines) {
+			if ($message_lines[$line] =~ m{\| ([^\r\n]+)}msx) {
+				# This line starts the long performance data
+				my $long_data = join q{ }, $1,
+					@message_lines[($line+1)..$#message_lines];
 
-					$data = defined $data ? "$data $long_data" : $long_data;
+				$data = defined $data ? "$data $long_data" : $long_data;
 
-					last LINE;
-				}
+				last LINE;
 			}
+		}
 
-			if (defined $data) {
-				# Parse all the performance data
-				my @data = map { Nagios::Plugin::OverHTTP::PerformanceData->new($_) }
-					Nagios::Plugin::OverHTTP::PerformanceData->split_performance_string($data);
+		if (defined $data) {
+			# Parse all the performance data
+			my @data = map { Nagios::Plugin::OverHTTP::PerformanceData->new($_) }
+				Nagios::Plugin::OverHTTP::PerformanceData->split_performance_string($data);
 
-				# Set attribute
-				$self->{performance_data} = \@data;
-			}
+			# Add to performance data array
+			push @{$performance_data_r}, @data;
 		}
 	}
 
-	# Return the message
-	return $message;
-}
-sub _extract_status_from_response {
-	my ($self, $response) = @_;
-
-	# First priority is the X-Nagios-Status header
-	my $status = to_Status($response->header('X-Nagios-Status'));
-
-	if (!defined $status && !defined $response->header('X-Nagios-Information')) {
-		# Since X-Status-Information is not present, attempt to extract it
-		# from the body
-		my $message = $response->decoded_content;
-
-		if (my ($inc_status) = $message =~ m{\A ([A-Z]+)\b }msx) {
-			# Attempt to get the status from the first all-caps word
-			$status = to_Status($inc_status);
-		}
-	}
-
-	# Return the status
-	return $status;
+	return;
 }
 sub _populate_from_url {
 	my ($self) = @_;
@@ -521,6 +486,53 @@ sub _request {
 	# Return the response
 	return $response;
 }
+sub _reset_trigger {
+	my ($self) = @_;
+
+	# Clear the state
+	$self->_clear_state;
+
+	# Clear the generated URL
+	$self->_clear_url;
+
+	return;
+}
+sub _response_error_information {
+	my ($self, $response) = @_;
+
+	if ($response->is_success) {
+		# This does not contain any error information
+		croak 'This response is not in error';
+	}
+
+	# Information to return
+	my ($status, $message) = ($STATUS_UNKNOWN, $response->status_line);
+
+	if (HTTP::Status::is_server_error($response->code)) {
+		# The response is a server error, which is critical
+		$status = $STATUS_CRITICAL;
+	}
+
+	if ($response->code == HTTP_INTERNAL_SERVER_ERROR) {
+		# This response likely came directly from LWP::UserAgent
+		if ($response->message eq 'read timeout') {
+			# Failure due to timeout
+			my $timeout = $self->has_timeout ? $self->timeout
+			                                 : $self->useragent->timeout
+			                                 ;
+
+			# Make the message explicitly about the timeout
+			$message = sprintf 'Socket timeout after %d seconds', $timeout;
+		}
+		elsif ($response->message =~ m{\(connect: \s timeout\)}msx) {
+			# Failure to connect to the host server
+			$message = 'Connection refused';
+		}
+	}
+
+	# Return status and message
+	return $status, $message;
+}
 sub _set_state {
 	my ($self, $status, $message) = @_;
 
@@ -543,6 +555,21 @@ sub _set_state {
 }
 
 ###########################################################################
+# PRIVATE FUNCTIONS
+sub _response_contains_plugin_output {
+	my ($response) = @_;
+
+	# It MUST contain output if it is a success
+	return $response->is_success;
+}
+sub _should_parse_body {
+	my ($response) = @_;
+
+	# Should if header message not present
+	return !defined $response->header($HEADER_MESSAGE);
+}
+
+###########################################################################
 # MAKE MOOSE OBJECT IMMUTABLE
 __PACKAGE__->meta->make_immutable;
 
@@ -556,7 +583,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.13_001
+Version 0.13_002
 
 =head1 SYNOPSIS
 
@@ -763,20 +790,22 @@ The protocol that this plugin uses to communicate with the Nagios plugins is
 unique to my knowledge. If anyone knows another way that plugins are
 communicating over HTTP then let me know.
 
-A request that returns a 5xx status will automatically return as CRITICAL and
-the plugin will display the error code and the status message (this will
-typically result in 500 Internal Server Error).
+A request that returns a C<5xx> status will automatically return as CRITICAL
+and the plugin will display the error code and the status message (this will
+typically result in C<500 Internal Server Error>).
 
-A request that returns a 2xx status will be parsed using the methods listed in
-L</HTTP BODY>.
+A request that returns a C<2xx> status will be parsed using the methods listed
+in L</HTTP BODY> and L</HTTP HEADER>.
 
-Any other status code will cause the plugin to return as UNKNOWN and the plugin
-will display the error code and the status message.
+If the response results is a redirect, the L</useragent> will automatically
+redirect the response and all processing will ultimately be done on the final
+response. Any other status code will cause the plugin to return as UNKNOWN and
+the plugin will display the error code and the status message.
 
 =head2 HTTP BODY
 
 The body of the HTTP response will be the output of the plugin unless the
-header C<X-Nagios-Information> is present. To determine what the status code
+header L</X-Nagios-Information> is present. To determine what the status code
 will be, the following methods are used:
 
 =over 4
@@ -784,23 +813,56 @@ will be, the following methods are used:
 =item 1.
 
 If a the header C<X-Nagios-Status> is present, the value from that is used as
-the output. The content of this header MUST be either the decimal return value
-of the plugin or an all capital letters. The different possibilities for this
-is listed in L</NAGIOS STATUSES>.
+the output. See L</X-Nagios-Status>.
 
 =item 2.
 
-If the header did not conform to proper specifications or was not present, then
-the status will be extracted from the body of the response. The very first set
-of all capital letters is taken from the body and used to determine the result.
-The different possibilities for this is listed in L</NAGIOS STATUSES>
+If the header was not present, then the status will be extracted from the body
+of the response. The very first set of all capital letters is taken from the
+body and used to determine the result. The different possibilities for this is
+listed in L</NAGIOS STATUSES>.
 
 =back
 
-Please note that if the header C<X-Nagios-Information> is present, then the
-status MUST be in the header C<X-Nagios-Status> as described above. The status
-will not be extracted from any text. The C<X-Nagios-Information> header support
-was added in version 0.12.
+=head2 HTTP HEADER
+
+The following HTTP headers have special meanings:
+
+=head3 C<< X-Nagios-Information >>
+
+B<Added in version 0.12>; be sure to require this version for this feature.
+
+If this header is present, then the content of this header will be used as the
+message for the plugin. Note: B<the body will not be parsed>. This is meant as
+an indication that the Nagios output is solely contained in the headers. This
+MUST contain the message ONLY. If this header appears multiple times, each
+instance is appended together with line breaks in the same order for multiline
+plugin output support.
+
+  X-Nagios-Information: Connection to database succeeded
+  X-Nagios-Information: 'www'@'localhost'
+
+=head3 C<< X-Nagios-Performance >>
+
+B<Added in version 0.14>; be sure to require this version for this feature.
+
+This header specifies various performance data from the plugin. This will add
+performance to the list of any data collected from the response body as
+specified in L</HTTP BODY>. Many performance data may be contained in a single
+header seperated by spaces any many headers may be specified.
+
+  X-Nagios-Performance: 'connect time'=0.0012s
+
+=head3 C<< X-Nagios-Status >>
+
+This header specifies the status. When this header is specified, then this is
+will override any other location where the status can come from. The content of
+this header MUST be either the decimal return value of the plugin or the status
+name in all capital letters. The different possibilities for this is listed in
+L</NAGIOS STATUSES>. If the header appears more than once, the first occurance
+is used.
+
+  X-Nagios-Status: OK
 
 =head2 NAGIOS STATUSES
 
@@ -879,7 +941,7 @@ Douglas Christopher Wilson, C<< <doug at somethingdoug.com> >>
 =over
 
 =item * Alex Wollangk contributed the idea and code for the
-C<X-Nagios-Information> header.
+L</X-Nagios-Information> header.
 
 =back
 
@@ -921,7 +983,7 @@ L<http://search.cpan.org/dist/Nagios-Plugin-OverHTTP/>
 
 =head1 LICENSE AND COPYRIGHT
 
-Copyright 2009 Douglas Christopher Wilson, all rights reserved.
+Copyright 2009-2010 Douglas Christopher Wilson, all rights reserved.
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of either:
