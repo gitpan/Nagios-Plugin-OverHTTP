@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.13_004';
+our $VERSION   = '0.14';
 
 ###########################################################################
 # MOOSE
@@ -16,7 +16,7 @@ use MooseX::StrictConstructor 0.08;
 
 ###########################################################################
 # MOOSE TYPES
-use Nagios::Plugin::OverHTTP::Library 0.12 qw(
+use Nagios::Plugin::OverHTTP::Library 0.14 qw(
 	Hostname
 	HTTPVerb
 	Path
@@ -31,8 +31,11 @@ use Carp qw(croak);
 use HTTP::Request 5.827;
 use HTTP::Status 5.817 qw(:constants);
 use LWP::UserAgent;
-use Nagios::Plugin::OverHTTP::PerformanceData;
+use Nagios::Plugin::OverHTTP::Formatter::Nagios::Auto;
+use Nagios::Plugin::OverHTTP::Middleware::PerformanceData;
+use Nagios::Plugin::OverHTTP::Parser::Standard;
 use Readonly 1.03;
+use Try::Tiny;
 use URI;
 
 ###########################################################################
@@ -52,9 +55,7 @@ Readonly our $STATUS_UNKNOWN  => 3;
 
 ###########################################################################
 # PRIVATE CONSTANTS
-Readonly my $HEADER_MESSAGE     => 'X-Nagios-Information';
-Readonly my $HEADER_PERFORMANCE => 'X-Nagios-Performance';
-Readonly my $HEADER_STATUS      => 'X-Nagios-Status';
+Readonly my $DEFAULT_REQUEST_METHOD => q{GET};
 
 ###########################################################################
 # ATTRIBUTES
@@ -81,7 +82,8 @@ has 'default_status' => (
 	documentation => q{The default status if none specified in the response},
 
 	coerce        => 1,
-	default       => $STATUS_UNKNOWN,
+	default       => $Nagios::Plugin::OverHTTP::Library::STATUS_UNKNOWN,
+	trigger       => sub { shift->_clear_parser },
 );
 has 'hostname' => (
 	is            => 'rw',
@@ -104,6 +106,16 @@ has 'message' => (
 	predicate     => 'has_message',
 	traits        => ['NoGetopt'],
 );
+has 'parser' => (
+	is            => 'rw',
+	does          => 'Nagios::Plugin::OverHTTP::Parser',
+	documentation => q{HTTP response parser},
+
+	builder       => '_build_parser',
+	clearer       => '_clear_parser',
+	lazy          => 1,
+	traits        => ['NoGetopt'],
+);
 has 'path' => (
 	is            => 'rw',
 	isa           => Path,
@@ -115,14 +127,6 @@ has 'path' => (
 	lazy          => 1,
 	predicate     => '_has_path',
 	trigger       => \&_reset_trigger,
-);
-has 'performance_data' => (
-	is            => 'ro',
-	isa           => 'ArrayRef',
-	documentation => q{Array of performance data from the plugin},
-
-	clearer       => '_clear_performance_data',
-	predicate     => 'has_performance_data',
 );
 has 'ssl' => (
 	is            => 'rw',
@@ -201,124 +205,98 @@ has 'warning' => (
 sub check {
 	my ($self) = @_;
 
+	my ($message, $status);
+
+	# Save the current timeout for the useragent
+	my $old_timeout = $self->useragent->timeout;
+
+	# Set the useragent's timeout to our timeout
+	# if a timeout has been declared.
+	if ($self->has_timeout) {
+		$self->useragent->timeout($self->timeout);
+	}
+
 	# Get the response of the plugin
-	my $response = $self->_request;
-
-	if (!_response_contains_plugin_output($response)) {
-		# Get the response error information
-		my ($status, $message) = $self->_response_error_information($response);
-
-		# Set the new state
-		$self->_set_state($status, $message);
-
-		# End check early
-		return;
+	my $response = try {
+		# Make request
+		$self->request(method => $self->verb, url => $self->url);
 	}
+	catch {
+		# Message is string of the error
+		$message = qq{$_};
 
-	# Default status and message
-	my ($status, $message);
+		# Status is critical
+		$status = $Nagios::Plugin::OverHTTP::Library::STATUS_CRITICAL;
 
-	# Default performance data
-	my @performance_data = ();
+		# Response undefined
+		undef;
+	};
 
-	if (_should_parse_body($response)) {
-		# Parse the body
-		$self->_parse_response_body($response,
-			\$status, \$message, \@performance_data # Parse alters these
+	# Restore the previous timeout value to the useragent
+	$self->useragent->timeout($old_timeout);
+
+	if (defined $response) {
+		# Rewrite performance data using default settings
+		$response = Nagios::Plugin::OverHTTP::Middleware::PerformanceData
+			->new(
+				critical_override => $self->critical,
+				warning_override  => $self->warning,
+			)->rewrite($response);
+
+		# Get the parsed message and status from formatter
+		my $formatter = Nagios::Plugin::OverHTTP::Formatter::Nagios::Auto->new(
+			response => $response,
 		);
-	}
 
-	if (defined $response->header($HEADER_MESSAGE)) {
-		# The message will be from the header
-		$message = join qq{\n},
-			$response->header($HEADER_MESSAGE);
-	}
-
-	if (defined $response->header($HEADER_STATUS)) {
-		# The status will be from the header
-		$status = to_Status($response->header($HEADER_STATUS));
-	}
-
-	if (defined $response->header($HEADER_PERFORMANCE)) {
-		# Add additional performance metrics
-		my $header_data = join q{ }, $response->header($HEADER_PERFORMANCE);
-
-		# Push
-		push @performance_data,
-			map { Nagios::Plugin::OverHTTP::PerformanceData->new($_) }
-				Nagios::Plugin::OverHTTP::PerformanceData->split_performance_string($header_data);
-	}
-
-	if (!defined $status) {
-		# The status was not found in the response
-		$status = $self->default_status;
-
-		if ($self->autocorrect_unknown_html
-			&& !defined $response->header('X-Nagios-Information')) {
-			# The setting is active to automatically correct unknown HTML
-			if ($message =~ m{\S+\s*[\r\n]+\s*\S+}msx) {
-				# This is a multi-line response.
-				if ($message =~ m{<(?:html|body|head)[^>]*>}imsx) {
-					# This looks like an HTML response. Most likely it is a
-					# response from the server that was intended for a user
-					# to see.
-
-					# This will be searching through the content to find
-					# something to use as the first line.
-
-					# See if a title or h1 can be found
-					my ($title) = $message =~ m{<title[^>]*>(.+?)</title>}imsx;
-					my ($h1   ) = $message =~ m{<h1   [^>]*>(.+?)</h1   >}imsx;
-
-					if (defined $title) {
-						# There was a title, so add it as the first line of the
-						# message
-						$message = sprintf "%s\n%s", $title, $message;
-					}
-					elsif (defined $h1) {
-						# There was a h1, so add it as the first line of the
-						# message
-						$message = sprintf "%s\n%s", $h1, $message;
-					}
-				}
-			}
-		}
-	}
-
-	#XXX: Fix later
-	DATA:
-	foreach my $data (@performance_data) {
-		my $label = $data->label;
-
-		if ($status != $STATUS_CRITICAL
-			&& exists $self->critical->{$label}) {
-			# Check for critical since not critical already
-			if ($data->is_within_range($self->critical->{$label})) {
-				# Set new status to critical
-				$status = $STATUS_CRITICAL;
-
-				# Since this is the worst status, stop here
-				last DATA;
-			}
-		}
-		if ($status != $STATUS_WARNING
-			&& $status != $STATUS_CRITICAL
-			&& exists $self->warning->{$label}) {
-			# Check for warning since not warning or critical already
-			if ($data->is_within_range($self->warning->{$label})) {
-				# Set new status to warning
-				$status = $STATUS_WARNING;
-			}
-		}
+		$message = $formatter->stdout;
+		$status  = $formatter->exit_code;
 	}
 
 	# Set the plugin state
 	$self->_set_state($status, $message);
 
-	# Set the performance data
-	$self->{performance_data} = \@performance_data;
-
 	return;
+}
+sub create_request {
+	my ($self, %args) = @_;
+
+	# Splice the arguments out
+	my ($method, $url) = @args{qw(method url)};
+
+	if (!defined $method) {
+		# Default method since method is not provided
+		$method = $DEFAULT_REQUEST_METHOD;
+	}
+
+	# Just the method and URL are supported
+	return HTTP::Request->new($method, $url);
+}
+sub request {
+	my ($self, @args) = @_;
+
+	# The request is either the only argument or created from the HASH
+	my $request = @args == 1 ? $args[0]
+	                         : $self->create_request(@args)
+	                         ;
+
+	# Get the response of the plugin
+	my $response = $self->useragent->request($request);
+
+	if (!$response->is_success && $response->code == HTTP_INTERNAL_SERVER_ERROR) {
+		# This response likely came directly from LWP::UserAgent
+		if ($response->message eq 'read timeout') {
+			# Make the message explicitly about the timeout
+			croak sprintf 'Socket timeout after %d seconds',
+				$self->useragent->timeout;
+		}
+		elsif ($response->message =~ m{\(connect: \s timeout\)}msx) {
+			# Failure to connect to the host server
+			croak 'Connection refused';
+		}
+	}
+
+	# Return the parsed response
+	return $self->parser->parse($response);
 }
 sub run {
 	my ($self) = @_;
@@ -359,6 +337,13 @@ sub _build_message {
 sub _build_path {
 	return shift->_build_from_url('path');
 }
+sub _build_parser {
+	my ($self) = @_;
+
+	# Standard parser with the default status
+	return Nagios::Plugin::OverHTTP::Parser::Standard
+		->new(default_status => $self->default_status);
+}
 sub _build_ssl {
 	return shift->_build_from_url('ssl');
 }
@@ -395,63 +380,6 @@ sub _clear_state {
 	# Nothing useful to return, so chain
 	return $self;
 }
-sub _parse_response_body {
-	my ($self, $response, $status_r, $message_r, $performance_data_r) = @_;
-
-	# Set the message to the decoded content body
-	${$message_r} = $response->decoded_content;
-
-	# Parse for the status code
-	if (${$message_r} =~ m{\A (?:[^a-z]+ \s+)? (OK|WARNING|CRITICAL|UNKNOWN)}msx) {
-		# Found the status
-		${$status_r} = to_Status($1);
-	}
-
-	if (!defined ${$status_r} && $response->headers->content_is_html) {
-		# This is HTML, so what we will do is strip all surrounding tags
-		# since it looks like a valid status wasn't found
-		${$message_r} =~ s{\s* < [^>]+ > \s*}{}gmsx; # XXX: Fix me later
-
-		# Reparse for the status code
-		if (${$message_r} =~ m{\A (?:[^a-z]+ \s+)? (OK|WARNING|CRITICAL|UNKNOWN)}msx) {
-			# Found the status
-			${$status_r} = to_Status($1);
-		}
-	}
-
-	if (${$message_r} =~ m{\|}msx) {
-		# Looks like there is performance data to parse somewhere
-		my @message_lines = split m{[\r\n]{1,2}}msx, ${$message_r};
-
-		# Get the data from the first line
-		my (undef, $data) = split m{\|}msx, $message_lines[0];
-
-		# Search through the other lines for long performance data
-		LINE:
-		foreach my $line (1..$#message_lines) {
-			if ($message_lines[$line] =~ m{\| ([^\r\n]+)}msx) {
-				# This line starts the long performance data
-				my $long_data = join q{ }, $1,
-					@message_lines[($line+1)..$#message_lines];
-
-				$data = defined $data ? "$data $long_data" : $long_data;
-
-				last LINE;
-			}
-		}
-
-		if (defined $data) {
-			# Parse all the performance data
-			my @data = map { Nagios::Plugin::OverHTTP::PerformanceData->new($_) }
-				Nagios::Plugin::OverHTTP::PerformanceData->split_performance_string($data);
-
-			# Add to performance data array
-			push @{$performance_data_r}, @data;
-		}
-	}
-
-	return;
-}
 sub _populate_from_url {
 	my ($self) = @_;
 
@@ -474,30 +402,6 @@ sub _populate_from_url {
 	# Nothing useful to return, so chain
 	return $self;
 }
-sub _request {
-	my ($self) = @_;
-
-	# Save the current timeout for the useragent
-	my $old_timeout = $self->useragent->timeout;
-
-	# Set the useragent's timeout to our timeout
-	# if a timeout has been declared.
-	if ($self->has_timeout) {
-		$self->useragent->timeout($self->timeout);
-	}
-
-	# Form the HTTP request
-	my $request = HTTP::Request->new($self->verb, $self->url);
-
-	# Get the response of the plugin
-	my $response = $self->useragent->request($request);
-
-	# Restore the previous timeout value to the useragent
-	$self->useragent->timeout($old_timeout);
-
-	# Return the response
-	return $response;
-}
 sub _reset_trigger {
 	my ($self) = @_;
 
@@ -509,50 +413,14 @@ sub _reset_trigger {
 
 	return;
 }
-sub _response_error_information {
-	my ($self, $response) = @_;
-
-	if ($response->is_success) {
-		# This does not contain any error information
-		croak 'This response is not in error';
-	}
-
-	# Information to return
-	my ($status, $message) = ($STATUS_UNKNOWN, $response->status_line);
-
-	if (HTTP::Status::is_server_error($response->code)) {
-		# The response is a server error, which is critical
-		$status = $STATUS_CRITICAL;
-	}
-
-	if ($response->code == HTTP_INTERNAL_SERVER_ERROR) {
-		# This response likely came directly from LWP::UserAgent
-		if ($response->message eq 'read timeout') {
-			# Failure due to timeout
-			my $timeout = $self->has_timeout ? $self->timeout
-			                                 : $self->useragent->timeout
-			                                 ;
-
-			# Make the message explicitly about the timeout
-			$message = sprintf 'Socket timeout after %d seconds', $timeout;
-		}
-		elsif ($response->message =~ m{\(connect: \s timeout\)}msx) {
-			# Failure to connect to the host server
-			$message = 'Connection refused';
-		}
-	}
-
-	# Return status and message
-	return $status, $message;
-}
 sub _set_state {
 	my ($self, $status, $message) = @_;
 
 	my %status_prefix_map = (
-		$STATUS_OK       => 'OK',
-		$STATUS_WARNING  => 'WARNING',
-		$STATUS_CRITICAL => 'CRITICAL',
-		$STATUS_UNKNOWN  => 'UNKNOWN',
+		$Nagios::Plugin::OverHTTP::Library::STATUS_OK       => 'OK',
+		$Nagios::Plugin::OverHTTP::Library::STATUS_WARNING  => 'WARNING',
+		$Nagios::Plugin::OverHTTP::Library::STATUS_CRITICAL => 'CRITICAL',
+		$Nagios::Plugin::OverHTTP::Library::STATUS_UNKNOWN  => 'UNKNOWN',
 	);
 
 	if ($message !~ m{\A $status_prefix_map{$status}}msx) {
@@ -564,21 +432,6 @@ sub _set_state {
 
 	# Nothing useful to return, so chain
 	return $self;
-}
-
-###########################################################################
-# PRIVATE FUNCTIONS
-sub _response_contains_plugin_output {
-	my ($response) = @_;
-
-	# It MUST contain output if it is a success
-	return $response->is_success;
-}
-sub _should_parse_body {
-	my ($response) = @_;
-
-	# Should if header message not present
-	return !defined $response->header($HEADER_MESSAGE);
 }
 
 ###########################################################################
@@ -595,7 +448,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
 
 =head1 VERSION
 
-Version 0.13_004
+This documentation refers to L<Nagios::Plugin::OverHTTP> version 0.14
 
 =head1 SYNOPSIS
 
@@ -699,6 +552,13 @@ or a string with the name of the status, like:
 This is the hostname of the remote server. This will automatically be populated
 if L</url> is set.
 
+=head2 parser
+
+B<Added in version 0.14>; be sure to require this version for this feature.
+
+This is a response parser object that does L<Nagios::Plugin::OverHTTP::Parser>.
+By default, it is the L<Nagios::Plugin::OverHTTP::Parser::Standard> parser.
+
 =head2 path
 
 This is the path to the remove Nagios plugin on the remote server. This will
@@ -749,6 +609,36 @@ format for the threshold is specified in L</PERFORMANCE THRESHOLD>.
 
 This will run the remote check. This is usually not needed, as attempting to
 access the message or status will result in the check being performed.
+
+=head2 create_request
+
+B<Added in version 0.14>; be sure to require this version for this feature.
+
+This will create a L<HTTP::Request> object from the arguments including any
+additional headers added by the plugin. This method takes a HASH as the
+argument with the following keys:
+
+=over 4
+
+=item method
+
+This is the HTTP request method. By default this will be C<GET>.
+
+=item url
+
+B<Required>. This is the URL to request.
+
+=back
+
+=head2 request
+
+B<Added in version 0.14>; be sure to require this version for this feature.
+
+This will return a L<Nagios::Plugin::OverHTTP::Response> object representing
+the plugin response from the server. This method takes either one argument
+which is a L<HTTP::Request> object that will use L</useragent> to make the
+request, or a HASH with the same arguments as L</create_request>. The response
+is parsed with the parser in L</parser>.
 
 =head2 run
 
@@ -938,6 +828,8 @@ server.
 
 =item * L<Readonly> 1.03
 
+=item * L<Try::Tiny>
+
 =item * L<URI>
 
 =item * L<namespace::clean> 0.04
@@ -954,6 +846,9 @@ Douglas Christopher Wilson, C<< <doug at somethingdoug.com> >>
 
 =item * Alex Wollangk contributed the idea and code for the
 L</X-Nagios-Information> header.
+
+=item * Peter van Eijk pushed me to get performance data handling
+implemented.
 
 =back
 

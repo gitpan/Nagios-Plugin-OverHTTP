@@ -1,7 +1,6 @@
 use inc::Module::Install;
 
 use Module::Install::AuthorRequires 0.02;
-use Module::Install::AuthorTests 0.002;
 
 name     'Nagios-Plugin-OverHTTP';
 all_from 'lib/Nagios/Plugin/OverHTTP.pm';
@@ -17,17 +16,25 @@ requires
 	'Data::Validate::Domain'    => '0.02',
 	'Data::Validate::URI'       => '0.05',
 	'Carp'                      => 0,
+	'English'                   => 0,
+	'Env::Path'                 => '0.04',
 	'Getopt::Long::Descriptive' => 0,
+	'HTML::Strip'               => '1.04',
 	'HTTP::Request'             => '5.827',
 	'HTTP::Status'              => '5.817',
+	'IPC::System::Simple'       => '0.13',
 	'LWP::UserAgent'            => 0,
 	'Moose'                     => '0.74',
+	'Moose::Role'               => '0.74',
+	'MooseX::Clone'             => '0.05',
 	'MooseX::Getopt'            => '0.19',
 	'MooseX::StrictConstructor' => '0.08',
 	'MooseX::Types'             => '0.08',
 	'MooseX::Types::Moose'      => 0,
 	'Readonly'                  => '1.03',
+	'Regexp::Common'            => '2.119',
 	'Scalar::Util'              => '1.19',
+	'Try::Tiny'                 => 0,
 	'URI'                       => 0,
 	'namespace::clean'          => '0.04';
 
@@ -46,9 +53,6 @@ author_requires
 
 # Enable tests to be in multi-level directories
 tests_recursive;
-
-# Author tests in xt/
-recursive_author_tests('xt');
 
 # Write the provided classes in the META
 auto_provides;

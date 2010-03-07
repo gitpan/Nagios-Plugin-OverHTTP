@@ -7,13 +7,15 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.13_004';
+our $VERSION   = '0.14';
 
 ###########################################################################
 # MOOSE
 use MooseX::Types 0.08 -declare => [qw(
+	FormatterClass
 	Hostname
 	HTTPVerb
+	ParserClass
 	Path
 	Status
 	Timeout
@@ -28,14 +30,31 @@ use MooseX::Types::Moose qw(Int Str);
 # MODULE IMPORTS
 use Data::Validate::Domain 0.02;
 use Data::Validate::URI 0.05;
-use Nagios::Plugin::OverHTTP;
+use Readonly 1.03;
 
 ###########################################################################
 # ALL IMPORTS BEFORE THIS WILL BE ERASED
 use namespace::clean 0.04 -except => [qw(meta)];
 
 ###########################################################################
+# CONSTANTS
+Readonly our $STATUS_OK       => 0;
+Readonly our $STATUS_WARNING  => 1;
+Readonly our $STATUS_CRITICAL => 2;
+Readonly our $STATUS_UNKNOWN  => 3;
+
+###########################################################################
+# PRIVATE CONSTANTS
+Readonly my $FORMATTER_API => 'Nagios::Plugin::OverHTTP::Formatter';
+Readonly my $PARSER_API    => 'Nagios::Plugin::OverHTTP::Parser';
+
+###########################################################################
 # TYPES DEFINITIONS
+subtype FormatterClass,
+	as Str,
+	where { require $_; $_->does($FORMATTER_API) },
+	message { "Formatter class must do $FORMATTER_API" };
+
 subtype Hostname,
 	as Str,
 	where { Data::Validate::Domain::is_hostname($_) },
@@ -43,6 +62,11 @@ subtype Hostname,
 
 enum HTTPVerb,
 	qw(DELETE GET HEAD OPTIONS POST PUT TRACE);
+
+subtype ParserClass,
+	as Str,
+	where { require $_; $_->does($PARSER_API) },
+	message { "Parser class must do $PARSER_API" };
 
 subtype Path,
 	as Str,
@@ -65,6 +89,14 @@ subtype URL,
 	message { 'Must be a valid URL' };
 
 # Type coercions
+coerce FormatterClass,
+	from Str,
+		via { s{\A ::}{$FORMATTER_API\::}msx; };
+
+coerce ParserClass,
+	from Str,
+		via { s{\A ::}{$PARSER_API\::}msx; };
+
 coerce Path,
 	from Str,
 		via { m{\A /}msx ? "$_" : "/$_" };
@@ -82,10 +114,10 @@ sub _status_from_str {
 	$status_string = uc $status_string;
 
 	my %status_prefix_map = (
-		OK       => $Nagios::Plugin::OverHTTP::STATUS_OK,
-		WARNING  => $Nagios::Plugin::OverHTTP::STATUS_WARNING,
-		CRITICAL => $Nagios::Plugin::OverHTTP::STATUS_CRITICAL,
-		UNKNOWN  => $Nagios::Plugin::OverHTTP::STATUS_UNKNOWN,
+		OK       => $STATUS_OK,
+		WARNING  => $STATUS_WARNING,
+		CRITICAL => $STATUS_CRITICAL,
+		UNKNOWN  => $STATUS_UNKNOWN,
 	);
 
 	if (!exists $status_prefix_map{$status_string}) {
@@ -107,7 +139,7 @@ L<Nagios::Plugin::OverHTTP>
 
 =head1 VERSION
 
-This documentation refers to <Nagios::Plugin::OverHTTP::Library> version 0.13_004
+This documentation refers to L<Nagios::Plugin::OverHTTP::Library> version 0.14
 
 =head1 SYNOPSIS
 
@@ -171,6 +203,24 @@ greater than zero.
 This specifies a URL. This is a string and is validated using the
 L<Data::Validate::URI> library with the C<is_uri> function.
 
+=head1 CONSTANTS PROVIDED
+
+=head2 C<< $STATUS_OK >>
+
+Represents a status of OK.
+
+=head2 C<< $STATUS_WARNING >>
+
+Represents a status of warning.
+
+=head2 C<< $STATUS_CRITICAL >>
+
+Represents a status of critical.
+
+=head2 C<< $STATUS_UNKNOWN >>
+
+Represents a status of unknown.
+
 =head1 DEPENDENCIES
 
 This module is dependent on the following modules:
@@ -182,6 +232,8 @@ This module is dependent on the following modules:
 =item * L<Data::Validate::URI> 0.05
 
 =item * L<MooseX::Types> 0.08
+
+=item * L<Readonly> 1.03
 
 =item * L<namespace::clean> 0.04
 
