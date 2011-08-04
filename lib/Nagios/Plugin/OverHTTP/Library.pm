@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.14';
+our $VERSION   = '0.15';
 
 ###########################################################################
 # MOOSE
@@ -28,9 +28,9 @@ use MooseX::Types::Moose qw(Int Str);
 
 ###########################################################################
 # MODULE IMPORTS
+use Const::Fast qw(const);
 use Data::Validate::Domain 0.02;
 use Data::Validate::URI 0.05;
-use Readonly 1.03;
 
 ###########################################################################
 # ALL IMPORTS BEFORE THIS WILL BE ERASED
@@ -38,15 +38,15 @@ use namespace::clean 0.04 -except => [qw(meta)];
 
 ###########################################################################
 # CONSTANTS
-Readonly our $STATUS_OK       => 0;
-Readonly our $STATUS_WARNING  => 1;
-Readonly our $STATUS_CRITICAL => 2;
-Readonly our $STATUS_UNKNOWN  => 3;
+const our $STATUS_OK       => 0;
+const our $STATUS_WARNING  => 1;
+const our $STATUS_CRITICAL => 2;
+const our $STATUS_UNKNOWN  => 3;
 
 ###########################################################################
 # PRIVATE CONSTANTS
-Readonly my $FORMATTER_API => 'Nagios::Plugin::OverHTTP::Formatter';
-Readonly my $PARSER_API    => 'Nagios::Plugin::OverHTTP::Parser';
+const my $FORMATTER_API => 'Nagios::Plugin::OverHTTP::Formatter';
+const my $PARSER_API    => 'Nagios::Plugin::OverHTTP::Parser';
 
 ###########################################################################
 # TYPES DEFINITIONS
@@ -139,7 +139,7 @@ L<Nagios::Plugin::OverHTTP>
 
 =head1 VERSION
 
-This documentation refers to L<Nagios::Plugin::OverHTTP::Library> version 0.14
+This documentation refers to L<Nagios::Plugin::OverHTTP::Library> version 0.15
 
 =head1 SYNOPSIS
 
@@ -227,13 +227,13 @@ This module is dependent on the following modules:
 
 =over 4
 
+=item * L<Const::Fast>
+
 =item * L<Data::Validate::Domain> 0.02
 
 =item * L<Data::Validate::URI> 0.05
 
 =item * L<MooseX::Types> 0.08
-
-=item * L<Readonly> 1.03
 
 =item * L<namespace::clean> 0.04
 

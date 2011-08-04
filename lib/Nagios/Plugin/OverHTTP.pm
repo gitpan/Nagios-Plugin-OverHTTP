@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.14';
+our $VERSION   = '0.15';
 
 ###########################################################################
 # MOOSE
@@ -28,14 +28,15 @@ use Nagios::Plugin::OverHTTP::Library 0.14 qw(
 ###########################################################################
 # MODULE IMPORTS
 use Carp qw(croak);
+use Const::Fast qw(const);
 use HTTP::Request 5.827;
 use HTTP::Status 5.817 qw(:constants);
 use LWP::UserAgent;
 use Nagios::Plugin::OverHTTP::Formatter::Nagios::Auto;
 use Nagios::Plugin::OverHTTP::Middleware::PerformanceData;
 use Nagios::Plugin::OverHTTP::Parser::Standard;
-use Readonly 1.03;
-use Try::Tiny;
+use Nagios::Plugin::OverHTTP::Response;
+use Try::Tiny 0.04;
 use URI;
 
 ###########################################################################
@@ -48,14 +49,14 @@ with 'MooseX::Getopt';
 
 ###########################################################################
 # PUBLIC CONSTANTS
-Readonly our $STATUS_OK       => 0;
-Readonly our $STATUS_WARNING  => 1;
-Readonly our $STATUS_CRITICAL => 2;
-Readonly our $STATUS_UNKNOWN  => 3;
+const our $STATUS_OK       => 0;
+const our $STATUS_WARNING  => 1;
+const our $STATUS_CRITICAL => 2;
+const our $STATUS_UNKNOWN  => 3;
 
 ###########################################################################
 # PRIVATE CONSTANTS
-Readonly my $DEFAULT_REQUEST_METHOD => q{GET};
+const my $DEFAULT_REQUEST_METHOD => q{GET};
 
 ###########################################################################
 # ATTRIBUTES
@@ -203,59 +204,48 @@ has 'warning' => (
 ###########################################################################
 # METHODS
 sub check {
-	my ($self) = @_;
+	my ($self, %args) = @_;
 
-	my ($message, $status);
+	# Get the argument for exceptions
+	my $catch_exceptions = $args{catch_exceptions} || 0;
 
 	# Save the current timeout for the useragent
 	my $old_timeout = $self->useragent->timeout;
 
-	# Set the useragent's timeout to our timeout
-	# if a timeout has been declared.
+	# Set the useragent's timeout to our timeout if a timeout has been declared.
 	if ($self->has_timeout) {
 		$self->useragent->timeout($self->timeout);
 	}
 
+	my $response;
+
 	# Get the response of the plugin
-	my $response = try {
+	try {
 		# Make request
-		$self->request(method => $self->verb, url => $self->url);
+		$response = $self->request(method => $self->verb, url => $self->url);
 	}
 	catch {
-		# Message is string of the error
-		$message = qq{$_};
+		if ($catch_exceptions) {
+			# Return a response with the error message
+			$response = Nagios::Plugin::OverHTTP::Response->new(
+				# Message is string of the error
+				message => qq{$_},
 
-		# Status is critical
-		$status = $Nagios::Plugin::OverHTTP::Library::STATUS_CRITICAL;
-
-		# Response undefined
-		undef;
+				# Status is critical
+				status => $Nagios::Plugin::OverHTTP::Library::STATUS_CRITICAL,
+			);
+		}
+		else {
+			# Rethrow the error
+			croak $_;
+		}
+	}
+	finally {
+		# Restore the previous timeout value to the useragent
+		$self->useragent->timeout($old_timeout);
 	};
 
-	# Restore the previous timeout value to the useragent
-	$self->useragent->timeout($old_timeout);
-
-	if (defined $response) {
-		# Rewrite performance data using default settings
-		$response = Nagios::Plugin::OverHTTP::Middleware::PerformanceData
-			->new(
-				critical_override => $self->critical,
-				warning_override  => $self->warning,
-			)->rewrite($response);
-
-		# Get the parsed message and status from formatter
-		my $formatter = Nagios::Plugin::OverHTTP::Formatter::Nagios::Auto->new(
-			response => $response,
-		);
-
-		$message = $formatter->stdout;
-		$status  = $formatter->exit_code;
-	}
-
-	# Set the plugin state
-	$self->_set_state($status, $message);
-
-	return;
+	return $response;
 }
 sub create_request {
 	my ($self, %args) = @_;
@@ -301,11 +291,29 @@ sub request {
 sub run {
 	my ($self) = @_;
 
-	# Print the message to stdout
-	print $self->message;
+	# Perform the check
+	my $response = $self->check(catch_exceptions => 1);
 
-	# Return the status code
-	return $self->status;
+	# Rewrite performance data using default settings
+	$response = Nagios::Plugin::OverHTTP::Middleware::PerformanceData
+		->new(
+			critical_override => $self->critical,
+			warning_override  => $self->warning,
+		)->rewrite($response);
+
+	# Get the parsed message and status from formatter
+	my $formatter = Nagios::Plugin::OverHTTP::Formatter::Nagios::Auto->new(
+		response => $response,
+	);
+
+	# Print errors first
+	print {*STDERR} $formatter->stderr;
+
+	# Print standard output
+	print {*STDOUT} $formatter->stdout;
+
+	# Return exit code
+	return $formatter->exit_code;
 }
 
 ###########################################################################
@@ -313,8 +321,23 @@ sub run {
 sub _build_after_check {
 	my ($self, $attribute) = @_;
 
-	# Preform the check
-	$self->check;
+	# Perform the check
+	my $response = $self->check(catch_exceptions => 1);
+
+	# Rewrite performance data using default settings
+	$response = Nagios::Plugin::OverHTTP::Middleware::PerformanceData
+		->new(
+			critical_override => $self->critical,
+			warning_override  => $self->warning,
+		)->rewrite($response);
+
+	# Get the parsed message and status from formatter
+	my $formatter = Nagios::Plugin::OverHTTP::Formatter::Nagios::Auto->new(
+		response => $response,
+	);
+
+	# Set the plugin state
+	$self->_set_state($formatter->exit_code, $formatter->stdout);
 
 	# Return the specified attribute for build
 	return $self->{$attribute};
@@ -444,11 +467,11 @@ __END__
 
 =head1 NAME
 
-Nagios::Plugin::OverHTTP - Nagios plugin to check over the HTTP protocol.
+Nagios::Plugin::OverHTTP - Nagios plugin to check over HTTP.
 
 =head1 VERSION
 
-This documentation refers to L<Nagios::Plugin::OverHTTP> version 0.14
+This documentation refers to L<Nagios::Plugin::OverHTTP> version 0.15
 
 =head1 SYNOPSIS
 
@@ -814,6 +837,8 @@ server.
 
 =item * L<Carp>
 
+=item * L<Const::Fast>
+
 =item * L<HTTP::Request> 5.827
 
 =item * L<HTTP::Status> 5.817
@@ -825,8 +850,6 @@ server.
 =item * L<MooseX::Getopt> 0.19
 
 =item * L<MooseX::StrictConstructor> 0.08
-
-=item * L<Readonly> 1.03
 
 =item * L<Try::Tiny>
 

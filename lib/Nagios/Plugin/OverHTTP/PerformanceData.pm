@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.14';
+our $VERSION   = '0.15';
 
 ###########################################################################
 # MOOSE
@@ -21,7 +21,7 @@ use MooseX::Types::Moose qw(Int Str);
 ###########################################################################
 # MODULE IMPORTS
 use Carp qw(croak);
-use Readonly 1.03;
+use Const::Fast qw(const);
 use Regexp::Common 2.119;
 
 ###########################################################################
@@ -30,8 +30,8 @@ use namespace::clean 0.04 -except => [qw(meta)];
 
 ###########################################################################
 # PRIVATE CONSTANTS
-Readonly my $NUMBER       => $RE{num}{real};
-Readonly my $QUOTED_LABEL => $RE{delimited}{-delim => q{'}}{-esc => q{'}};
+const my $NUMBER       => $RE{num}{real};
+const my $QUOTED_LABEL => $RE{delimited}{-delim => q{'}}{-esc => q{'}};
 
 ###########################################################################
 # ATTRIBUTES
@@ -313,7 +313,7 @@ Nagios plugin
 =head1 VERSION
 
 This documentation refers to L<Nagios::Plugin::OverHTTP::PerformanceData>
-version 0.14
+version 0.15
 
 =head1 SYNOPSIS
 
@@ -487,13 +487,13 @@ This module is dependent on the following modules:
 
 =item * L<Carp>
 
+=item * L<Const::Fast>
+
 =item * L<Moose> 0.74
 
 =item * L<MooseX::StrictConstructor> 0.08
 
 =item * L<MooseX::Types::Moose>
-
-=item * L<Readonly> 1.03
 
 =item * L<Regexp::Common> 2.119
 

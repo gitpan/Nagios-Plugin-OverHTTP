@@ -1,4 +1,4 @@
-package Nagios::Plugin::OverHTTP::Formatter::Nagios::Version3;
+package Nagios::Plugin::OverHTTP::Middleware::StatusPrefix;
 
 use 5.008001;
 use strict;
@@ -15,53 +15,54 @@ use Moose 0.74;
 use MooseX::StrictConstructor 0.08;
 
 ###########################################################################
-# ROLES
-with 'Nagios::Plugin::OverHTTP::Formatter';
+# MOOSE ROLES
+with 'Nagios::Plugin::OverHTTP::Middleware';
+
+###########################################################################
+# MOOSE TYPES
+use Nagios::Plugin::OverHTTP::Library 0.14 qw(Status);
 
 ###########################################################################
 # ALL IMPORTS BEFORE THIS WILL BE ERASED
 use namespace::clean 0.04 -except => [qw(meta)];
 
 ###########################################################################
+# ATTRIBUTES
+has 'plugin_name' => (
+	is            => 'rw',
+	isa           => 'Str',
+	documentation => q{The name of the plugin},
+	required      => 1,
+);
+
+###########################################################################
 # METHODS
-sub exit_code {
-	my ($self) = @_;
+sub rewrite {
+	my ($self, $response) = @_;
 
-	# Just return the default
-	return $self->standard_status_exit_code($self->response->status);
-}
-sub stderr {
-	# N/A
-	return q{};
-}
-sub stdout {
-	my ($self) = @_;
-
-	if (!$self->response->has_performance_data) {
-		# If there is no performance data, the output is the message
-		return $self->response->message;
+	if ($response->message =~ m{\A (?:\P{IsLower}+ \s)+ ([A-Z]+) \s -}msx) {
+		# The response messages looks like it may already have a status prefix
+		if (defined to_Status($1)) {
+			# The last uppercase word before the dash is a status
+			return $response;
+		}
 	}
 
-	# Cut into lines
-	my @message_lines = split m{\n}msx, $self->response->message;
-	my @performance_data_lines = split m{\n}msx, $self->response->performance_data;
+	# Create a map of the status representation to the name
+	my %status_prefix_map = map {
+		to_Status($_) => $_
+	} qw(OK WARNING CRITICAL UNKNOWN);
 
-	# Build stdout with first two lines
-	my $stdout = join q{ | },
-		shift(@message_lines),
-		shift @performance_data_lines;
+	# Create the new message string
+	my $new_message = sprintf '%s %s - %s',
+		uc($self->plugin_name),
+		$status_prefix_map{$response->status},
+		$response->message;
 
-	# Rest of stdout is the rest of the message
-	$stdout .= join qq{\n}, q{}, @message_lines;
-
-	if (@performance_data_lines) {
-		# Then any remaining performance data lines
-		$stdout .= join qq{\n},
-			q{ | } . shift(@performance_data_lines),
-			@performance_data_lines;
-	}
-
-	return $stdout;
+	# Return the modified response
+	return $response->clone(
+		message => $new_message,
+	);
 }
 
 ###########################################################################
@@ -74,13 +75,13 @@ __END__
 
 =head1 NAME
 
-Nagios::Plugin::OverHTTP::Formatter::Nagios::Version3 - Format output for
-Nagios version 3
+Nagios::Plugin::OverHTTP::Middleware::StatusPrefix - Adds plugin name and
+status to response messages
 
 =head1 VERSION
 
-This documentation refers to L<Nagios::Plugin::OverHTTP::Formatter::Nagios::Version3>
-version 0.15
+This documentation refers to
+L<Nagios::Plugin::OverHTTP::Middleware::StatusPrefix> version 0.15
 
 =head1 SYNOPSIS
 
@@ -88,8 +89,14 @@ version 0.15
 
 =head1 DESCRIPTION
 
-This formatter for L<Nagios::Plugin::OverHTTP> will format the plugin output
-that corresponds to the plugin API in Nagios 3.
+This is a middleware for L<Nagios::Plugin::OverHTTP> that will modify the
+response by adding the plugin name and status to the beginning of the message
+as recommended by Nagios plugin guidelines.
+
+  PLUGIN OK - Some information
+  \_________/
+       |
+  Added by middleware
 
 =head1 CONSTRUCTOR
 
@@ -116,34 +123,18 @@ L</ATTRIBUTES> section).
 
 =head1 ATTRIBUTES
 
-  # Set an attribute
-  $object->attribute_name($new_value);
+=head2 plugin_name
 
-  # Get an attribute
-  my $value = $object->attribute_name;
-
-=head2 response
-
-B<Required>. This is the L<Nagios::Plugin::OverHTTP::Response> object to
-format.
+B<Required>. This is a string of the name of the plugin. This will be made all
+uppercase automatically.
 
 =head1 METHODS
 
-=head2 exit_code
+=head2 rewrite
 
-This will return the integer to use as the argument to C<exit>.
-
-=head2 stderr
-
-This will return the string to print to C<stderr>.
-
-  print {*STDERR} $formatter->stderr;
-
-=head2 stdout
-
-This will return the string to print to C<stdout>.
-
-  print {*STDOUT} $formatter->stdout;
+This takes a L<Nagios::Plugin::OverHTTP::Response> object and rewrites it based
+on the arguments provided and object creation time and return a
+L<Nagios::Plugin::OverHTTP::Response> object.
 
 =head1 DEPENDENCIES
 
@@ -154,6 +145,10 @@ This module is dependent on the following modules:
 =item * L<Moose> 0.74
 
 =item * L<MooseX::StrictConstructor> 0.08
+
+=item * L<Nagios::Plugin::OverHTTP::Library> 0.14
+
+=item * L<Nagios::Plugin::OverHTTP::Middleware>
 
 =item * L<namespace::clean> 0.04
 
