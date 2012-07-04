@@ -7,7 +7,7 @@ use warnings 'all';
 ###########################################################################
 # METADATA
 our $AUTHORITY = 'cpan:DOUGDUDE';
-our $VERSION   = '0.15';
+our $VERSION   = '0.16';
 
 ###########################################################################
 # MOOSE
@@ -471,7 +471,7 @@ Nagios::Plugin::OverHTTP - Nagios plugin to check over HTTP.
 
 =head1 VERSION
 
-This documentation refers to L<Nagios::Plugin::OverHTTP> version 0.15
+This documentation refers to L<Nagios::Plugin::OverHTTP> version 0.16
 
 =head1 SYNOPSIS
 
@@ -913,7 +913,7 @@ L<http://search.cpan.org/dist/Nagios-Plugin-OverHTTP/>
 
 =head1 LICENSE AND COPYRIGHT
 
-Copyright 2009-2010 Douglas Christopher Wilson, all rights reserved.
+Copyright 2009-2012 Douglas Christopher Wilson, all rights reserved.
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of either:
